@@ -35,7 +35,7 @@ def test_resolves_the_exact_reported_case(repo_map):
     """The specific case from the user's report: handleRenderRoute is a
     real function the sidecar already knows about."""
     result = _handle_resolve_function(repo_map, {"name": "handleRenderRoute"})
-    assert result == {"found": True, "rel_fname": "handlers.js", "line": 56}
+    assert result == {"found": True, "rel_fname": "handlers.js", "line": 59}
 
 
 def test_unknown_name_returns_not_found(repo_map):
