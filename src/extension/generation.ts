@@ -1,0 +1,67 @@
+import { ExplanationCache, CacheRow } from './cache/explanationCache';
+import { EMBEDDING_MODEL_ID, MODEL_ID, PROMPT_VERSION } from './cache/config';
+import { computeCacheKey } from './cache/hash';
+import { ResolvedFunction } from './functionResolution';
+import { SidecarManager } from './sidecar/sidecarManager';
+
+// Real generation is two sequential Ollama calls (sidecar/generation/), which
+// can comfortably exceed the 4s default RPC timeout meant for near-instant
+// methods like `status`/`index_file` -- see session-06 artifact.
+const GENERATE_TIMEOUT_MS = 120_000;
+
+// Every caller already has a `ResolvedFunction` (from `functionResolution.ts`)
+// on hand, so `generateAndCache` takes one directly rather than a bespoke
+// param shape.
+export type GenerationTarget = ResolvedFunction;
+
+/**
+ * Calls the sidecar's `generate_explanation` and writes the resulting row to
+ * the cache. Shared by three callers that all need the identical
+ * sidecar-call + cache-key + write sequence (Session 8): the hover
+ * provider's cache-miss path, debounced-save re-indexing, and the manual
+ * refresh command. Previously this lived inline in the hover provider only
+ * (Sessions 5-7); pulled out here rather than let Session 8's two new
+ * callers duplicate it.
+ */
+export async function generateAndCache(
+    sidecar: SidecarManager,
+    cache: ExplanationCache,
+    target: GenerationTarget
+): Promise<CacheRow> {
+    const result = await sidecar.request<{
+        context_hash: string;
+        context_tier: string;
+        explanation: Record<string, unknown>;
+    }>(
+        'generate_explanation',
+        {
+            file_path: target.relFile,
+            name: target.name,
+            line: target.range.start.line,
+            fn_source: target.fnSource,
+            model_id: MODEL_ID,
+        },
+        GENERATE_TIMEOUT_MS
+    );
+
+    const row: CacheRow = {
+        cache_key: computeCacheKey({
+            fnSource: target.fnSource,
+            contextHash: result.context_hash,
+            modelId: MODEL_ID,
+            embeddingModelId: EMBEDDING_MODEL_ID,
+            promptVersion: PROMPT_VERSION,
+        }),
+        fn_id: target.fnId,
+        explanation_json: JSON.stringify(result.explanation),
+        fn_hash: target.fnHash,
+        context_hash: result.context_hash,
+        model_id: MODEL_ID,
+        embedding_model_id: EMBEDDING_MODEL_ID,
+        prompt_version: PROMPT_VERSION,
+        context_tier: result.context_tier,
+        generated_at: new Date().toISOString(),
+    };
+    cache.write(row);
+    return row;
+}

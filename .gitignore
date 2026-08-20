@@ -1,0 +1,10 @@
+out/
+node_modules/
+*.vsix
+__pycache__/
+.pytest_cache/
+*.pyc
+
+# Vendored upstream clones kept for reading during porting (e.g. repomap.py) --
+# not first-party code, not meant to enter this repo's own history.
+reference/

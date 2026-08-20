@@ -1,0 +1,9 @@
+tree-sitter==0.26.0
+tree-sitter-javascript==0.25.0
+networkx==3.6.1
+numpy==2.5.2
+scipy==1.18.0
+lancedb==0.26.0
+pathspec==0.12.1
+pytest==9.1.1
+pywin32==310; sys_platform == "win32"

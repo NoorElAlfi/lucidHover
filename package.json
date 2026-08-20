@@ -1,0 +1,86 @@
+{
+  "name": "lucidhover",
+  "displayName": "LucidHover",
+  "description": "Codebase-aware function explainer (v0 skeleton)",
+  "version": "0.0.1",
+  "private": true,
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Hover explanations require an indexed workspace. In untrusted workspaces, indexing and sidecar-based generation are disabled until the workspace is trusted."
+    }
+  },
+  "activationEvents": [
+    "onLanguage:javascript"
+  ],
+  "main": "./out/extension/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "lucidhover",
+          "title": "LucidHover",
+          "icon": "media/lucidhover-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "lucidhover": [
+        {
+          "id": "lucidhover.explanationPanel",
+          "name": "Explanation",
+          "type": "webview",
+          "contextualTitle": "LucidHover"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "lucidhover.showMore",
+        "title": "LucidHover: Show More Detail"
+      },
+      {
+        "command": "lucidhover.refreshExplanation",
+        "title": "LucidHover: Refresh Explanation for Function Under Cursor"
+      },
+      {
+        "command": "lucidhover.cancelBackgroundIndexing",
+        "title": "LucidHover: Cancel Background Indexing"
+      },
+      {
+        "command": "lucidhover.installGitHooks",
+        "title": "LucidHover: Install Git Hooks"
+      }
+    ],
+    "configuration": {
+      "title": "LucidHover",
+      "properties": {
+        "lucidHover.backgroundFlushIntervalSeconds": {
+          "type": "number",
+          "default": 25,
+          "minimum": 5,
+          "description": "How often (in seconds) LucidHover checks functions edited but not yet saved and regenerates their explanations in the background."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.90.0",
+    "@types/node": "^20.0.0",
+    "@types/better-sqlite3": "^9.6.0",
+    "typescript": "^5.4.0"
+  }
+}
