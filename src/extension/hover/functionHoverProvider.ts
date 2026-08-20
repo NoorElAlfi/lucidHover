@@ -1,30 +1,57 @@
 import * as vscode from 'vscode';
 import { ExplanationCache, CacheRow } from '../cache/explanationCache';
-import { EMBEDDING_MODEL_ID, MODEL_ID, PROMPT_VERSION } from '../cache/config';
+import { EMBEDDING_MODEL_ID, PROMPT_VERSION, resolveModelId } from '../cache/config';
+import { DirtyTracker } from '../dirtyTracking';
 import { generateAndCache } from '../generation';
 import { resolveEnclosingFunction } from '../functionResolution';
 import { SHOW_MORE_COMMAND_ID } from '../panel/explanationPanelProvider';
 import { SidecarManager } from '../sidecar/sidecarManager';
+import { StaleTracker } from '../staleTracking';
 
 interface Level0Fields {
     role_tag?: unknown;
     one_liner?: unknown;
 }
 
+type FreshnessState = 'fresh' | 'dirty' | 'stale';
+
 /**
- * Level 0 only (Session 7): role_tag + one_liner, hardcoded "fresh" freshness
- * (the dirty/stale distinction doesn't exist until Session 8's invalidation
- * work -- see spec's Hover UX visual rules, v0 note). why_it_exists/used_by/
- * calls/side_effects/risk_note move to the docked panel, never rendered here.
+ * Session 13 (Build Order step 13): replaces the v0 hardcoded "fresh"
+ * placeholder (see session-05/07 artifacts) with the spec's real dirty/stale
+ * distinction. `dirty` (an unsaved, in-memory edit to this exact function --
+ * `DirtyTracker`, Session 12) takes precedence over `stale` (this function's
+ * own content hasn't changed, but a cached dependency's has -- `StaleTracker`,
+ * this session): a function mid-edit is already known to be showing
+ * possibly-outdated content for a stronger reason than a dependency change,
+ * so there's no need to show both at once. Both reads are synchronous
+ * in-memory lookups -- no sidecar call, per Core Rule 4.
  */
-function renderMarkdown(row: CacheRow): vscode.MarkdownString {
+function freshnessOf(dirty: boolean, stale: boolean): FreshnessState {
+    if (dirty) {
+        return 'dirty';
+    }
+    if (stale) {
+        return 'stale';
+    }
+    return 'fresh';
+}
+
+/**
+ * Level 0 only (Session 7): role_tag + one_liner + freshness. why_it_exists/
+ * used_by/calls/side_effects/risk_note move to the docked panel, never
+ * rendered here -- and per this session's design pass, the freshness badge
+ * stays hover-only too: the docked panel is levels 1-2 *content*, not a
+ * freshness surface (spec's "Hover UX & Content Model" table), so it doesn't
+ * repeat this label.
+ */
+function renderMarkdown(row: CacheRow, freshness: FreshnessState): vscode.MarkdownString {
     const explanation = JSON.parse(row.explanation_json) as Level0Fields;
     const roleTag = typeof explanation.role_tag === 'string' ? explanation.role_tag : 'Unknown';
     const oneLiner = typeof explanation.one_liner === 'string' ? explanation.one_liner : '';
 
     const markdown = new vscode.MarkdownString();
     markdown.isTrusted = { enabledCommands: [SHOW_MORE_COMMAND_ID] };
-    markdown.appendMarkdown(`#### ${roleTag} · *fresh*\n\n`);
+    markdown.appendMarkdown(`#### ${roleTag} · *${freshness}*\n\n`);
     markdown.appendMarkdown(`**${oneLiner}**\n\n`);
     markdown.appendMarkdown('---\n\n');
     const args = encodeURIComponent(JSON.stringify([row.cache_key]));
@@ -48,6 +75,8 @@ export class ExplanationHoverProvider implements vscode.HoverProvider {
         private readonly getWorkspaceRoot: () => string | undefined,
         private readonly getCache: () => ExplanationCache | undefined,
         private readonly getSidecar: () => SidecarManager | undefined,
+        private readonly getDirtyTracker: () => DirtyTracker | undefined,
+        private readonly getStaleTracker: () => StaleTracker | undefined,
         private readonly output: vscode.OutputChannel
     ) {}
 
@@ -68,12 +97,12 @@ export class ExplanationHoverProvider implements vscode.HoverProvider {
         if (!resolved) {
             return undefined;
         }
-        const { fnId, fnHash, range } = resolved;
+        const { fnId, fnHash, relFile, range } = resolved;
 
         let row = cache.lookup({
             fnId,
             fnHash,
-            modelId: MODEL_ID,
+            modelId: resolveModelId(),
             embeddingModelId: EMBEDDING_MODEL_ID,
             promptVersion: PROMPT_VERSION,
         });
@@ -85,6 +114,9 @@ export class ExplanationHoverProvider implements vscode.HoverProvider {
             row = await generateAndCache(sidecar, cache, resolved);
         }
 
-        return new vscode.Hover(renderMarkdown(row), range);
+        const dirty = this.getDirtyTracker()?.dirtyFnIdsFor(relFile)?.has(fnId) ?? false;
+        const stale = this.getStaleTracker()?.isStale(relFile, fnId) ?? false;
+
+        return new vscode.Hover(renderMarkdown(row, freshnessOf(dirty, stale)), range);
     }
 }

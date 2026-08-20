@@ -1,10 +1,11 @@
 import * as vscode from 'vscode';
 import { ExplanationCache } from './cache/explanationCache';
-import { EMBEDDING_MODEL_ID, MODEL_ID, PROMPT_VERSION } from './cache/config';
+import { EMBEDDING_MODEL_ID, PROMPT_VERSION, resolveModelId } from './cache/config';
 import { KeyedDebouncer } from './debounce';
-import { relFileFor, resolveAllFunctions } from './functionResolution';
+import { relFileFor, ResolvedFunction, resolveAllFunctions } from './functionResolution';
 import { generateAndCache } from './generation';
 import { SidecarManager } from './sidecar/sidecarManager';
+import { flagStaleDependents, StaleTracker } from './staleTracking';
 
 // Spec's "Handling Active Development" table: debounced save fires "~500ms-1s
 // after last edit, or blur/tab-switch". We trigger off `onDidSaveTextDocument`
@@ -35,6 +36,7 @@ export class SaveReindexManager implements vscode.Disposable {
         private readonly getWorkspaceRoot: () => string | undefined,
         private readonly getCache: () => ExplanationCache | undefined,
         private readonly getSidecar: () => SidecarManager | undefined,
+        private readonly getStaleTracker: () => StaleTracker | undefined,
         private readonly output: vscode.OutputChannel
     ) {
         this.saveSubscription = vscode.workspace.onDidSaveTextDocument((document) => this.onSave(document));
@@ -72,14 +74,27 @@ export class SaveReindexManager implements vscode.Disposable {
         }
 
         const functions = await resolveAllFunctions(document, workspaceRoot);
+        const staleTracker = this.getStaleTracker();
         let regenerated = 0;
         let skipped = 0;
+        // Functions that turned out to be a confirmed content change (a prior
+        // row existed under a different fn_hash), not a first-ever
+        // generation -- see ExplanationCache.getCurrentRowForFnId's doc
+        // comment. Only these can make some *other* cached function's row
+        // stale (Session 13), so it's tracked separately from `regenerated`.
+        const changedFunctions: ResolvedFunction[] = [];
+        // Every fnId actually (re)generated this pass, changed or brand new
+        // -- guarded against below, since a self- or mutually-recursive
+        // function can otherwise show up as its *own* caller/callee in
+        // flagStaleDependents and get marked stale immediately after being
+        // regenerated fresh.
+        const regeneratedFnIds = new Set<string>();
 
         for (const fn of functions) {
             const cached = cache.lookup({
                 fnId: fn.fnId,
                 fnHash: fn.fnHash,
-                modelId: MODEL_ID,
+                modelId: resolveModelId(),
                 embeddingModelId: EMBEDDING_MODEL_ID,
                 promptVersion: PROMPT_VERSION,
             });
@@ -91,13 +106,38 @@ export class SaveReindexManager implements vscode.Disposable {
                 continue;
             }
 
+            const priorRow = cache.getCurrentRowForFnId({
+                fnId: fn.fnId,
+                modelId: resolveModelId(),
+                embeddingModelId: EMBEDDING_MODEL_ID,
+                promptVersion: PROMPT_VERSION,
+            });
+
             try {
-                await generateAndCache(sidecar, cache, fn);
+                const row = await generateAndCache(sidecar, cache, fn);
                 regenerated++;
+                regeneratedFnIds.add(fn.fnId);
+                if (priorRow && priorRow.fn_hash !== row.fn_hash) {
+                    changedFunctions.push(fn);
+                }
             } catch (err) {
                 this.output.appendLine(
                     `save-reindex: generate_explanation failed for ${fn.fnId}: ${String(err)}`
                 );
+            }
+        }
+
+        if (staleTracker && changedFunctions.length > 0) {
+            await flagStaleDependents(sidecar, workspaceRoot, relFile, changedFunctions, staleTracker, this.output);
+        }
+        // This pass's own regenerated rows are current again, whatever their
+        // freshness state was before (Core Design Decision #5: only an
+        // actual regeneration clears it) -- applied last, after flagging, so
+        // a self/mutually-recursive edge can't leave one of them stuck
+        // showing stale immediately after being freshly regenerated.
+        if (staleTracker) {
+            for (const fnId of regeneratedFnIds) {
+                staleTracker.clearFnId(relFile, fnId);
             }
         }
 

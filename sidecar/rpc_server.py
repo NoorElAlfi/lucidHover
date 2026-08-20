@@ -5,7 +5,7 @@ socket, per Core Design Decision #7 and the Architecture diagram.
 
 Run as:
   python -m sidecar.rpc_server <pipe-or-socket-address> <workspace-root> \
-      <storage-dir> <embedding-model-id>
+      <storage-dir> <embedding-model-id> <ollama-base-url>
 
 `storage_dir` (Session 11) is where the LanceDB retrieval index lives
 (`<storage_dir>/lancedb`) -- the extension host's `context.storageUri`,
@@ -16,6 +16,14 @@ a per-request param like `model_id` -- the corpus embedding pass and every
 later retrieval query must use the exact same embedding model, or nearest-
 neighbor search would silently compare vectors from two different models;
 single-sourcing it at spawn removes that drift risk entirely.
+
+`ollama_base_url` (Build Order step 14, custom local Ollama endpoint tier)
+is spawn-time for the same reason as `embedding_model_id`: the startup
+embedding pass needs it before any RPC request could otherwise deliver one,
+and generation + embeddings must hit the same Ollama daemon (mismatched
+daemons could have different models pulled). The extension host resolves
+and validates it (`lucidHover.ollamaEndpoint`, loopback-only per Core Rule
+1) before ever passing it here -- this module trusts the value it's given.
 
 Methods:
   - "status": heartbeat, echoes {ok: true, pid}.
@@ -30,9 +38,12 @@ Methods:
     `model_id` and `fn_source` are request params supplied by the extension
     host, not sidecar-owned constants -- see
     sidecar/generation/ollama_client.py's module docstring and session-06
-    artifact. A retrieval-query failure (e.g. the embedding model isn't
-    pulled) degrades to an empty retrieved-chunks list rather than failing
-    the whole request -- retrieval is an additive context tier, not a
+    artifact. The Ollama host itself (`ollama_base_url`) is read from
+    `repo_map.ollama_base_url`, the spawn-time value set in `main()` below,
+    not a request param -- see this module's own docstring for why. A
+    retrieval-query failure (e.g. the embedding model isn't pulled)
+    degrades to an empty retrieved-chunks list rather than failing the
+    whole request -- retrieval is an additive context tier, not a
     generation-correctness requirement (see session-11 artifact).
   - "reindex_file" (Session 8, Session 11 adds re-embedding): re-parses one
     file and rebuilds the ranked call graph, in response to the extension
@@ -54,6 +65,14 @@ Methods:
     already reads from, no second ranker. Backs the background
     pre-generation pass's walk order (most-likely-to-be-hovered functions
     first). No LLM call.
+  - "generate_file_summary" (Session 15 / Build Order step 15, secondary
+    summary-doc generator): given a file path and the already-generated
+    role_tag/one_liner for each of its functions (the extension host reads
+    these from its own `ExplanationCache`, not read here), returns one short
+    prose purpose paragraph for the file. The one new LLM call the
+    summary-doc generator needs -- everything else in that feature is a
+    template pass over data the cache already has. Same `ollama_base_url`
+    resolution as "generate_explanation" above.
 
 The extension host is the only client and connects/reconnects at most once
 per process lifetime (a crashed sidecar is a whole new process, not a
@@ -71,8 +90,8 @@ from dataclasses import asdict
 from typing import Any
 
 from .cache.hashing import CONTEXT_TIER_CALL_GRAPH_AND_RETRIEVAL, CONTEXT_TIER_CALL_GRAPH_ONLY, compute_context_hash
-from .generation.generate import generate_explanation
-from .generation.ollama_client import OllamaError
+from .generation.generate import generate_explanation, generate_file_summary
+from .generation.ollama_client import OLLAMA_BASE_URL, OllamaError
 from .repomap.context import FunctionContext, RepoMap
 from .retrieval.retrieve import RetrievedChunk, query_top_k, reindex_file_chunks, reindex_repo_chunks
 from .retrieval.vectorstore import VectorStore
@@ -151,10 +170,11 @@ def _query_retrieved_chunks(
     """
     vector_store: VectorStore | None = getattr(repo_map, "vector_store", None)
     embedding_model_id: str | None = getattr(repo_map, "embedding_model_id", None)
+    base_url = getattr(repo_map, "ollama_base_url", None) or OLLAMA_BASE_URL
     if vector_store is None or not embedding_model_id:
         return []
     try:
-        return query_top_k(vector_store, embedding_model_id, fn_source, rel_fname, start_line, end_line)
+        return query_top_k(vector_store, embedding_model_id, fn_source, rel_fname, start_line, end_line, base_url)
     except OllamaError as exc:
         _log(f"retrieval query failed, continuing without retrieved chunks: {exc}")
         return []
@@ -182,8 +202,9 @@ def _handle_generate_explanation(repo_map: RepoMap, params: dict[str, Any]) -> d
     context_hash = compute_context_hash(ctx, retrieved_chunks)
     context_tier = CONTEXT_TIER_CALL_GRAPH_AND_RETRIEVAL if retrieved_chunks else CONTEXT_TIER_CALL_GRAPH_ONLY
 
+    base_url = getattr(repo_map, "ollama_base_url", None) or OLLAMA_BASE_URL
     try:
-        explanation = generate_explanation(model_id, fn_source, ctx, retrieved_chunks)
+        explanation = generate_explanation(model_id, fn_source, ctx, retrieved_chunks, base_url)
     except OllamaError as exc:
         # Per the session instructions: never silently stub or fall back on
         # a generation failure -- surface it as a clear JSON-RPC error so
@@ -203,9 +224,10 @@ def _handle_reindex_file(repo_map: RepoMap, params: dict[str, Any]) -> dict[str,
 
     vector_store: VectorStore | None = getattr(repo_map, "vector_store", None)
     embedding_model_id: str | None = getattr(repo_map, "embedding_model_id", None)
+    base_url = getattr(repo_map, "ollama_base_url", None) or OLLAMA_BASE_URL
     if vector_store is not None and embedding_model_id:
         try:
-            reindex_file_chunks(repo_map.root, rel_fname, vector_store, embedding_model_id)
+            reindex_file_chunks(repo_map.root, rel_fname, vector_store, embedding_model_id, base_url)
         except OllamaError as exc:
             _log(f"re-embedding {rel_fname} failed, retrieval index left stale for this file: {exc}")
 
@@ -248,6 +270,24 @@ def _handle_list_ranked_functions(repo_map: RepoMap, _params: dict[str, Any]) ->
     return {"functions": functions}
 
 
+def _handle_generate_file_summary(repo_map: RepoMap, params: dict[str, Any]) -> dict[str, Any]:
+    file_path = params["file_path"]
+    functions = params["functions"]
+    model_id = params["model_id"]
+
+    base_url = getattr(repo_map, "ollama_base_url", None) or OLLAMA_BASE_URL
+    try:
+        summary = generate_file_summary(model_id, file_path, functions, base_url)
+    except OllamaError as exc:
+        # Same "never silently stub or fall back" rule as
+        # _handle_generate_explanation -- the extension host decides how to
+        # degrade a single failed page (see summaryDocGenerator.ts), this
+        # just surfaces the real error.
+        raise RuntimeError(str(exc)) from exc
+
+    return {"summary": summary}
+
+
 _METHODS = {
     "status": _handle_status,
     "index_file": _handle_index_file,
@@ -255,6 +295,7 @@ _METHODS = {
     "reindex_file": _handle_reindex_file,
     "resolve_function": _handle_resolve_function,
     "list_ranked_functions": _handle_list_ranked_functions,
+    "generate_file_summary": _handle_generate_file_summary,
 }
 
 
@@ -360,15 +401,21 @@ def _serve_posix(address: str, repo_map: RepoMap) -> None:
 
 
 def main() -> None:
-    if len(sys.argv) != 5:
+    if len(sys.argv) != 6:
         print(
             "usage: python -m sidecar.rpc_server <pipe-or-socket-address> <workspace-root> "
-            "<storage-dir> <embedding-model-id>",
+            "<storage-dir> <embedding-model-id> <ollama-base-url>",
             file=sys.stderr,
         )
         sys.exit(1)
 
-    address, root, storage_dir, embedding_model_id = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+    address, root, storage_dir, embedding_model_id, ollama_base_url = (
+        sys.argv[1],
+        sys.argv[2],
+        sys.argv[3],
+        sys.argv[4],
+        sys.argv[5],
+    )
 
     _log(f"indexing {root} ...")
     repo_map = RepoMap(root)
@@ -394,11 +441,12 @@ def main() -> None:
     # restarted -- it must never crash the sidecar or block generation.
     repo_map.vector_store = VectorStore(storage_dir)
     repo_map.embedding_model_id = embedding_model_id
+    repo_map.ollama_base_url = ollama_base_url
 
     def _embed_repo_in_background() -> None:
-        _log(f"embedding repo chunks (model={embedding_model_id}) ...")
+        _log(f"embedding repo chunks (model={embedding_model_id}, ollama={ollama_base_url}) ...")
         try:
-            chunk_count = reindex_repo_chunks(root, repo_map.vector_store, embedding_model_id)
+            chunk_count = reindex_repo_chunks(root, repo_map.vector_store, embedding_model_id, ollama_base_url)
             _log(f"embedded {chunk_count} chunks")
         except OllamaError as exc:
             _log(f"initial embedding pass failed, retrieval tier stays empty until fixed: {exc}")

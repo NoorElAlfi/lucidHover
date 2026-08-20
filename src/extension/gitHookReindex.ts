@@ -1,12 +1,13 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { ExplanationCache } from './cache/explanationCache';
-import { EMBEDDING_MODEL_ID, MODEL_ID, PROMPT_VERSION } from './cache/config';
+import { EMBEDDING_MODEL_ID, PROMPT_VERSION, resolveModelId } from './cache/config';
 import { KeyedDebouncer } from './debounce';
-import { resolveFunctionsInFile } from './functionResolution';
+import { resolveFunctionsInFile, ResolvedFunction } from './functionResolution';
 import { generateAndCache } from './generation';
 import { hooksInstalled, installAllHooks, isRealGitRepo, readOptional } from './gitHookInstaller';
 import { SidecarManager } from './sidecar/sidecarManager';
+import { flagStaleDependents, StaleTracker } from './staleTracking';
 
 export const INSTALL_GIT_HOOKS_COMMAND_ID = 'lucidhover.installGitHooks';
 
@@ -48,6 +49,7 @@ export class GitHookReindexManager implements vscode.Disposable {
         private readonly getWorkspaceRoot: () => string | undefined,
         private readonly getCache: () => ExplanationCache | undefined,
         private readonly getSidecar: () => SidecarManager | undefined,
+        private readonly getStaleTracker: () => StaleTracker | undefined,
         private readonly workspaceState: vscode.Memento,
         private readonly output: vscode.OutputChannel
     ) {}
@@ -143,6 +145,7 @@ export class GitHookReindexManager implements vscode.Disposable {
         }
         const cache = this.getCache();
         const sidecar = this.getSidecar();
+        const staleTracker = this.getStaleTracker();
         if (!cache || !sidecar) {
             return;
         }
@@ -168,6 +171,11 @@ export class GitHookReindexManager implements vscode.Disposable {
         this.output.appendLine(`git-hook: re-indexing ${relFiles.length} file(s) from ${markerPath}`);
         let regenerated = 0;
         let skipped = 0;
+        // Same cross-file recursion guard as BackgroundFlushManager: every
+        // {relFile, fnId} actually (re)generated across every file this
+        // marker touched, cleared as a final pass after all
+        // flagStaleDependents calls below.
+        const regeneratedThisPass: { relFile: string; fnId: string }[] = [];
 
         try {
             for (const relFile of relFiles) {
@@ -182,6 +190,7 @@ export class GitHookReindexManager implements vscode.Disposable {
                 }
 
                 const functions = await resolveFunctionsInFile(workspaceRoot, relFile, this.output);
+                const changedFunctions: ResolvedFunction[] = [];
                 for (const fn of functions) {
                     if (token.isCancellationRequested) {
                         break;
@@ -189,7 +198,7 @@ export class GitHookReindexManager implements vscode.Disposable {
                     const cached = cache.lookup({
                         fnId: fn.fnId,
                         fnHash: fn.fnHash,
-                        modelId: MODEL_ID,
+                        modelId: resolveModelId(),
                         embeddingModelId: EMBEDDING_MODEL_ID,
                         promptVersion: PROMPT_VERSION,
                     });
@@ -197,13 +206,35 @@ export class GitHookReindexManager implements vscode.Disposable {
                         skipped++;
                         continue;
                     }
+
+                    const priorRow = cache.getCurrentRowForFnId({
+                        fnId: fn.fnId,
+                        modelId: resolveModelId(),
+                        embeddingModelId: EMBEDDING_MODEL_ID,
+                        promptVersion: PROMPT_VERSION,
+                    });
+
                     try {
-                        await generateAndCache(sidecar, cache, fn);
+                        const row = await generateAndCache(sidecar, cache, fn);
                         regenerated++;
+                        regeneratedThisPass.push({ relFile, fnId: fn.fnId });
+                        if (priorRow && priorRow.fn_hash !== row.fn_hash) {
+                            changedFunctions.push(fn);
+                        }
                     } catch (err) {
                         this.output.appendLine(`git-hook: generate_explanation failed for ${fn.fnId}: ${String(err)}`);
                     }
                     await this.delay(DELAY_BETWEEN_GENERATIONS_MS, token);
+                }
+
+                if (staleTracker && changedFunctions.length > 0) {
+                    await flagStaleDependents(sidecar, workspaceRoot, relFile, changedFunctions, staleTracker, this.output);
+                }
+            }
+
+            if (staleTracker) {
+                for (const { relFile: regeneratedRelFile, fnId } of regeneratedThisPass) {
+                    staleTracker.clearFnId(regeneratedRelFile, fnId);
                 }
             }
         } finally {

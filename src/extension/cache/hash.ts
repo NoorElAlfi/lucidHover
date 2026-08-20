@@ -41,3 +41,21 @@ export function computeCacheKey(params: {
     const { fnSource, contextHash, modelId, embeddingModelId, promptVersion } = params;
     return sha256(fnSource + contextHash + modelId + embeddingModelId + promptVersion);
 }
+
+/**
+ * Surrogate fn_hash for a file's synthetic `__file_summary__` cache row
+ * (Session 15's per-file purpose paragraph, Build Order step 15) -- there's
+ * no single function source to hash for a whole file, so this hashes the
+ * sorted set of that file's own functions' real `fn_hash` values instead.
+ * It changes exactly when the set of cached function hashes for the file
+ * changes (a function's content changed, or one was added/removed), which
+ * is exactly the condition under which the purpose paragraph could
+ * plausibly be stale -- same "confirmed content change" semantics fn_hash
+ * already has for a real function, just computed over a set instead of one
+ * source string. Sorted so hash order (an implementation detail of however
+ * the caller enumerated the file's functions) never itself changes the
+ * result.
+ */
+export function computeFileSummaryFnHash(fnHashes: readonly string[]): string {
+    return sha256([...fnHashes].sort().join(','));
+}

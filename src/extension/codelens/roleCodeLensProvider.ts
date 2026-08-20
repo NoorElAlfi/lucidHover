@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { ExplanationCache } from '../cache/explanationCache';
-import { EMBEDDING_MODEL_ID, MODEL_ID, PROMPT_VERSION } from '../cache/config';
+import { EMBEDDING_MODEL_ID, PROMPT_VERSION, resolveModelId } from '../cache/config';
 import { resolveAllFunctions } from '../functionResolution';
 import { categoryEmoji, classifyRoleTag, PENDING_CODELENS_TITLE } from './roleCategory';
 
@@ -63,7 +63,7 @@ export class RoleCodeLensProvider implements vscode.CodeLensProvider, vscode.Dis
             const row = cache.lookup({
                 fnId: fn.fnId,
                 fnHash: fn.fnHash,
-                modelId: MODEL_ID,
+                modelId: resolveModelId(),
                 embeddingModelId: EMBEDDING_MODEL_ID,
                 promptVersion: PROMPT_VERSION,
             });

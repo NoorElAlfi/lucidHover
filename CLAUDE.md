@@ -103,6 +103,9 @@ detail. Detail lives in the artifact.
 | 10 | CodeLens role badge + gutter icon providers | complete | [session-10-codelens-gutter.md](.claude/sessions/session-10-codelens-gutter.md) |
 | 11 | Local embeddings + retrieval (Continue.dev pattern, Ollama + LanceDB) | complete | [session-11-embeddings-retrieval.md](.claude/sessions/session-11-embeddings-retrieval.md) |
 | 12 | Full layered change triggers (dirty-tracking, periodic flush, git hooks) | complete | [session-12-full-change-triggers.md](.claude/sessions/session-12-full-change-triggers.md) |
+| 13 | Staleness indicator UI (freshness badge) | complete | [session-13-staleness-badge.md](.claude/sessions/session-13-staleness-badge.md) |
+| 14 | Custom local Ollama endpoint tier | complete | [session-14-custom-ollama-endpoint.md](.claude/sessions/session-14-custom-ollama-endpoint.md) |
+| 15 | Secondary summary-doc generator | complete | [session-15-summary-doc-generator.md](.claude/sessions/session-15-summary-doc-generator.md) |
 
 ## File ownership (avoid overlapping edits across parallel work)
 
