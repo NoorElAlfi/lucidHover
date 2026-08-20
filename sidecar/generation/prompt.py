@@ -329,3 +329,38 @@ def build_json_prompt(
     """Stage B: same input slot, now with the Stage A reasoning text filled in, asking for the schema-constrained JSON that follows it."""
     real_input = _format_input_slot(fn_source, caller_names, callee_names, context_bundle)
     return f"{real_input} {reasoning.strip()}\n\nJSON:"
+
+
+# Build Order step 15 (secondary summary-doc generator, post-MVP): a wholly
+# separate, much smaller prompt from everything above -- summarizes a file's
+# *already-generated* per-function role_tag/one_liner pairs (supplied by the
+# extension host, which owns the cache) into one short purpose paragraph, per
+# the spec's "one LLM call per file/module for the purpose paragraph". Free
+# prose, not schema-constrained (`generate_text`, not `generate_structured`):
+# a paragraph isn't structured data, and this is explicitly "a rendering
+# target for data already computed, not a second pipeline" -- no few-shot
+# examples, no Reasoning: stage, just one direct instruction-and-answer call.
+FILE_SUMMARY_SYSTEM_INSTRUCTION = """You are writing a short "purpose" paragraph for one source file, as part of \
+a generated wiki page for a codebase that's new to the reader. You are given the file's path and, for each \
+function already indexed in it, a role_tag and one_liner that were already generated and verified against the \
+real code -- treat them as ground truth; do not re-derive or contradict them.
+
+Write 2-4 plain-prose sentences describing what this file is for and, if it's clear from the given roles, how its \
+functions relate to each other. No bullet list, no markdown, no restating any one_liner verbatim. If the \
+functions look unrelated to each other, say so rather than inventing a common thread."""
+
+
+def build_file_summary_prompt(file_path: str, functions: list[dict]) -> str:
+    """
+    `functions` is a list of `{"name", "role_tag", "one_liner"}` dicts, in
+    the same ranked order the extension host already resolved them in (no
+    ranking decision made here).
+    """
+    lines = [f"File: {file_path}", "", "Functions:"]
+    for fn in functions:
+        role = fn.get("role_tag") or "unknown role"
+        one_liner = fn.get("one_liner") or "no summary available"
+        lines.append(f"  - {fn['name']} ({role}): {one_liner}")
+    lines.append("")
+    lines.append("Purpose paragraph:")
+    return "\n".join(lines)

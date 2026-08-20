@@ -40,6 +40,7 @@ export class ExplanationCache {
 
     private readonly lookupStmt;
     private readonly lookupByCacheKeyStmt;
+    private readonly currentRowForFnIdStmt;
     private readonly writeStmt;
 
     // No `vscode` dependency here (deliberate -- this class only needs
@@ -84,6 +85,22 @@ export class ExplanationCache {
             SELECT * FROM explanation_cache WHERE cache_key = ? LIMIT 1
         `);
 
+        // Session 13 (staleness detection): unlike `lookupStmt`, deliberately
+        // does NOT filter on fn_hash -- this is how a trigger that's about to
+        // regenerate a function (because the exact-hash lookup missed) finds
+        // out whether that miss means "genuinely new function" (no row here)
+        // or "confirmed content change" (a prior row exists, under a
+        // different fn_hash). `cache_key` is the table's primary key, not
+        // fn_id, so an old row survives under its old cache_key after a
+        // regeneration writes a new row for the new fn_hash -- ordering by
+        // generated_at picks the one that was most recently the "live" row
+        // for this fn_id under the current model/embedding/prompt tuple.
+        this.currentRowForFnIdStmt = this.db.prepare(`
+            SELECT * FROM explanation_cache
+            WHERE fn_id = ? AND model_id = ? AND embedding_model_id = ? AND prompt_version = ?
+            ORDER BY generated_at DESC LIMIT 1
+        `);
+
         this.writeStmt = this.db.prepare(`
             INSERT OR REPLACE INTO explanation_cache
                 (cache_key, fn_id, explanation_json, fn_hash, context_hash, model_id, embedding_model_id, prompt_version, context_tier, generated_at)
@@ -109,6 +126,27 @@ export class ExplanationCache {
      */
     getByCacheKey(cacheKey: string): CacheRow | undefined {
         return this.lookupByCacheKeyStmt.get(cacheKey) as CacheRow | undefined;
+    }
+
+    /**
+     * The row that was most recently "live" for `fnId` under the given
+     * model/embedding/prompt tuple, regardless of `fn_hash` -- used by
+     * save/flush/git-hook re-indexing to tell a brand-new function apart
+     * from a confirmed content change to a previously-cached one (Session
+     * 13's staleness detection; see this class's doc comment above).
+     */
+    getCurrentRowForFnId(params: {
+        fnId: string;
+        modelId: string;
+        embeddingModelId: string;
+        promptVersion: string;
+    }): CacheRow | undefined {
+        return this.currentRowForFnIdStmt.get(
+            params.fnId,
+            params.modelId,
+            params.embeddingModelId,
+            params.promptVersion
+        ) as CacheRow | undefined;
     }
 
     write(row: CacheRow): void {

@@ -1,10 +1,11 @@
 import * as vscode from 'vscode';
 import { ExplanationCache } from './cache/explanationCache';
-import { EMBEDDING_MODEL_ID, MODEL_ID, PROMPT_VERSION } from './cache/config';
+import { EMBEDDING_MODEL_ID, PROMPT_VERSION, resolveModelId } from './cache/config';
 import { DirtyTracker } from './dirtyTracking';
-import { resolveFunctionsInFile } from './functionResolution';
+import { resolveFunctionsInFile, ResolvedFunction } from './functionResolution';
 import { generateAndCache } from './generation';
 import { SidecarManager } from './sidecar/sidecarManager';
+import { flagStaleDependents, StaleTracker } from './staleTracking';
 
 const CONFIG_SECTION = 'lucidHover';
 const FLUSH_INTERVAL_SETTING = 'backgroundFlushIntervalSeconds';
@@ -56,6 +57,7 @@ export class BackgroundFlushManager implements vscode.Disposable {
         private readonly getCache: () => ExplanationCache | undefined,
         private readonly getSidecar: () => SidecarManager | undefined,
         private readonly getDirtyTracker: () => DirtyTracker | undefined,
+        private readonly getStaleTracker: () => StaleTracker | undefined,
         private readonly output: vscode.OutputChannel
     ) {
         // Started unconditionally at construction (same "always registered,
@@ -78,6 +80,7 @@ export class BackgroundFlushManager implements vscode.Disposable {
         const cache = this.getCache();
         const sidecar = this.getSidecar();
         const dirtyTracker = this.getDirtyTracker();
+        const staleTracker = this.getStaleTracker();
         if (!workspaceRoot || !cache || !sidecar || !dirtyTracker) {
             return;
         }
@@ -95,6 +98,13 @@ export class BackgroundFlushManager implements vscode.Disposable {
         let flushed = 0;
         let unchanged = 0;
         let failed = 0;
+        // Every {relFile, fnId} actually (re)generated this tick, across
+        // every dirty file processed below -- cleared as a final guard pass
+        // after all flagStaleDependents calls, so a self- or cross-file
+        // mutually-recursive edge can't leave one of them stuck stale
+        // immediately after being regenerated fresh (see saveReindex.ts's
+        // identical guard for the single-file case).
+        const regeneratedThisTick: { relFile: string; fnId: string }[] = [];
 
         try {
             for (const relFile of dirtyFiles) {
@@ -120,6 +130,7 @@ export class BackgroundFlushManager implements vscode.Disposable {
                 }
 
                 const resolved = await resolveFunctionsInFile(workspaceRoot, relFile, this.output);
+                const changedFunctions: ResolvedFunction[] = [];
 
                 for (const fnId of fnIdsToCheck) {
                     if (token.isCancellationRequested) {
@@ -139,7 +150,7 @@ export class BackgroundFlushManager implements vscode.Disposable {
                     const cached = cache.lookup({
                         fnId: fn.fnId,
                         fnHash: fn.fnHash,
-                        modelId: MODEL_ID,
+                        modelId: resolveModelId(),
                         embeddingModelId: EMBEDDING_MODEL_ID,
                         promptVersion: PROMPT_VERSION,
                     });
@@ -154,10 +165,21 @@ export class BackgroundFlushManager implements vscode.Disposable {
                         continue;
                     }
 
+                    const priorRow = cache.getCurrentRowForFnId({
+                        fnId: fn.fnId,
+                        modelId: resolveModelId(),
+                        embeddingModelId: EMBEDDING_MODEL_ID,
+                        promptVersion: PROMPT_VERSION,
+                    });
+
                     try {
-                        await generateAndCache(sidecar, cache, fn);
+                        const row = await generateAndCache(sidecar, cache, fn);
                         flushed++;
                         dirtyTracker.clearFnId(relFile, fnId);
+                        regeneratedThisTick.push({ relFile, fnId });
+                        if (priorRow && priorRow.fn_hash !== row.fn_hash) {
+                            changedFunctions.push(fn);
+                        }
                     } catch (err) {
                         failed++;
                         this.output.appendLine(`background-flush: generate_explanation failed for ${fnId}: ${String(err)}`);
@@ -168,6 +190,16 @@ export class BackgroundFlushManager implements vscode.Disposable {
                     }
 
                     await this.delay(DELAY_BETWEEN_GENERATIONS_MS, token);
+                }
+
+                if (staleTracker && changedFunctions.length > 0) {
+                    await flagStaleDependents(sidecar, workspaceRoot, relFile, changedFunctions, staleTracker, this.output);
+                }
+            }
+
+            if (staleTracker) {
+                for (const { relFile: regeneratedRelFile, fnId } of regeneratedThisTick) {
+                    staleTracker.clearFnId(regeneratedRelFile, fnId);
                 }
             }
         } finally {

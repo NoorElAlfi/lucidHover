@@ -2,7 +2,7 @@ import * as crypto from 'crypto';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { ExplanationCache, CacheRow } from '../cache/explanationCache';
-import { EMBEDDING_MODEL_ID, MODEL_ID, PROMPT_VERSION } from '../cache/config';
+import { EMBEDDING_MODEL_ID, PROMPT_VERSION, resolveModelId } from '../cache/config';
 import { resolveEnclosingFunction } from '../functionResolution';
 import { SidecarManager } from '../sidecar/sidecarManager';
 
@@ -132,7 +132,7 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
         const row = cache.lookup({
             fnId: resolved.fnId,
             fnHash: resolved.fnHash,
-            modelId: MODEL_ID,
+            modelId: resolveModelId(),
             embeddingModelId: EMBEDDING_MODEL_ID,
             promptVersion: PROMPT_VERSION,
         });

@@ -1,3 +1,5 @@
+import * as vscode from 'vscode';
+
 /**
  * v0 cache-key identity values. These are config the extension host already
  * owns per Core Design Decision #2's cache key formula.
@@ -19,6 +21,91 @@
  * MODEL_ID and the model Ollama actually runs can never drift apart.
  */
 export const MODEL_ID = 'qwen2.5-coder:1.5b';
+
+/**
+ * Build Order step 14 (custom local Ollama endpoint tier): `MODEL_ID` above
+ * is still the bundled default, but every cache-key/generation call site
+ * should resolve through this function instead of importing `MODEL_ID`
+ * directly, so a user override (`lucidHover.modelId`) and the default agree
+ * everywhere -- a cache-key `modelId` computed one way and a generation
+ * request sent another would mean permanent cache misses. `model_id` is
+ * already a per-`generate_explanation`-request param (not sidecar-owned),
+ * so unlike the endpoint below, this needs no sidecar restart to take
+ * effect -- the very next hover/save/refresh just sends the new value.
+ * Empty/whitespace-only settings values fall back to the bundled default,
+ * same as an unset setting.
+ */
+export function resolveModelId(): string {
+    const configured = vscode.workspace.getConfiguration('lucidHover').get<string>('modelId');
+    const trimmed = typeof configured === 'string' ? configured.trim() : '';
+    return trimmed.length > 0 ? trimmed : MODEL_ID;
+}
+
+/**
+ * Build Order step 14: the bundled default Ollama endpoint. Both the
+ * bundled and any custom-model tier talk to Ollama's local HTTP API (see
+ * sidecar/generation/ollama_client.py's module docstring) -- only the host
+ * differs.
+ */
+export const DEFAULT_OLLAMA_ENDPOINT = 'http://localhost:11434';
+
+export interface ResolvedOllamaEndpoint {
+    url: string;
+    /**
+     * Set when `lucidHover.ollamaEndpoint` was configured but rejected for
+     * not being a local address -- Core Rule 1 ("no cloud LLM providers,
+     * ever") applies to a user-supplied endpoint exactly as much as it does
+     * to the bundled one, so a non-loopback host (including Ollama's own
+     * cloud offering) is never dialed, not even on explicit request. The
+     * caller is expected to surface this to the user; `resolveOllamaEndpoint`
+     * itself only decides, it doesn't display anything.
+     */
+    rejectedValue?: string;
+}
+
+function isLoopbackHost(hostname: string): boolean {
+    // `URL#hostname` renders an IPv6 literal host with its brackets intact
+    // (`new URL('http://[::1]:11434').hostname === '[::1]'`, not `'::1'`) --
+    // strip them before comparing, or `http://[::1]:11434` would be wrongly
+    // rejected as non-local.
+    const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+    return normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '::1';
+}
+
+/**
+ * Resolves `lucidHover.ollamaEndpoint`, falling back to
+ * `DEFAULT_OLLAMA_ENDPOINT` when unset, unparsable, or non-local.
+ *
+ * Spawn-time only (Build Order step 14 design pass, question 3) -- like
+ * `EMBEDDING_MODEL_ID`, the sidecar's startup embedding pass needs this
+ * before any RPC request could otherwise deliver it, and per question 2,
+ * generation and embeddings must hit the same Ollama daemon (two daemons
+ * that may not have the same models pulled is a real correctness trap), so
+ * this can't be split into a per-request generation-only override the way
+ * `resolveModelId()` is. Changing the setting takes effect on the next
+ * sidecar (re)start -- see `SidecarManager.applyOllamaEndpoint()` and the
+ * "LucidHover: Restart Sidecar" command.
+ */
+export function resolveOllamaEndpoint(): ResolvedOllamaEndpoint {
+    const configured = vscode.workspace.getConfiguration('lucidHover').get<string>('ollamaEndpoint');
+    const trimmed = typeof configured === 'string' ? configured.trim() : '';
+    if (trimmed.length === 0) {
+        return { url: DEFAULT_OLLAMA_ENDPOINT };
+    }
+
+    let hostname: string;
+    try {
+        hostname = new URL(trimmed).hostname;
+    } catch {
+        return { url: DEFAULT_OLLAMA_ENDPOINT, rejectedValue: trimmed };
+    }
+
+    if (!isLoopbackHost(hostname)) {
+        return { url: DEFAULT_OLLAMA_ENDPOINT, rejectedValue: trimmed };
+    }
+    return { url: trimmed };
+}
+
 /**
  * `all-minilm`: Session 11 (Build Order step 11) flips this from the fixed
  * `'none'` it held since Session 5 to a real Ollama embedding model -- the
@@ -52,3 +139,18 @@ export const EMBEDDING_MODEL_ID = 'all-minilm';
  * the previous prompt don't get served as if they reflect the new one.
  */
 export const PROMPT_VERSION = 'few-shot-v3';
+
+/**
+ * Session 15 (Build Order step 15, secondary summary-doc generator,
+ * post-MVP): prompt version for the new per-file/module purpose-paragraph
+ * synthesis call (sidecar/generation/prompt.py's `build_file_summary_prompt`
+ * / `FILE_SUMMARY_SYSTEM_INSTRUCTION`) -- deliberately separate from
+ * `PROMPT_VERSION` above, which versions the per-function explanation
+ * prompt only. This is a wholly different prompt (summarizes a file's
+ * already-cached function summaries, not a function's own source), so it
+ * gets its own version constant rather than sharing one whose bumps mean
+ * something unrelated to this row's actual invalidation condition -- a
+ * `PROMPT_VERSION` bump for the function-explanation prompt shouldn't force
+ * every cached file-summary paragraph to regenerate too, and vice versa.
+ */
+export const SUMMARY_DOC_PROMPT_VERSION = 'summary-doc-v1';

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..generation.ollama_client import embed
+from ..generation.ollama_client import OLLAMA_BASE_URL, embed
 from .chunking import Chunk, chunk_file, chunk_repo
 from .vectorstore import VectorStore
 
@@ -35,30 +35,32 @@ class RetrievedChunk:
     text: str
 
 
-def _rows_for(chunks: list[Chunk], embed_model: str) -> list[dict]:
+def _rows_for(chunks: list[Chunk], embed_model: str, base_url: str) -> list[dict]:
     return [
         {
             "rel_fname": c.rel_fname,
             "start_line": c.start_line,
             "end_line": c.end_line,
             "text": c.text,
-            "vector": embed(embed_model, c.text),
+            "vector": embed(embed_model, c.text, base_url),
         }
         for c in chunks
     ]
 
 
-def reindex_repo_chunks(root: str, store: VectorStore, embed_model: str) -> int:
+def reindex_repo_chunks(root: str, store: VectorStore, embed_model: str, base_url: str = OLLAMA_BASE_URL) -> int:
     """Full-repo chunk + embed pass, run once at sidecar startup. Returns the chunk count."""
     chunks = chunk_repo(root)
-    store.replace_all(_rows_for(chunks, embed_model))
+    store.replace_all(_rows_for(chunks, embed_model, base_url))
     return len(chunks)
 
 
-def reindex_file_chunks(root: str, rel_fname: str, store: VectorStore, embed_model: str) -> int:
+def reindex_file_chunks(
+    root: str, rel_fname: str, store: VectorStore, embed_model: str, base_url: str = OLLAMA_BASE_URL
+) -> int:
     """One file's chunks, re-run on the save-triggered `reindex_file` RPC. Returns the chunk count."""
     chunks = chunk_file(root, rel_fname)
-    store.replace_file(rel_fname, _rows_for(chunks, embed_model))
+    store.replace_file(rel_fname, _rows_for(chunks, embed_model, base_url))
     return len(chunks)
 
 
@@ -75,6 +77,7 @@ def query_top_k(
     rel_fname: str,
     start_line: int,
     end_line: int,
+    base_url: str = OLLAMA_BASE_URL,
 ) -> list[RetrievedChunk]:
     """
     Top-`TOP_K` nearest chunks to `fn_source`, excluding chunks that overlap
@@ -82,7 +85,7 @@ def query_top_k(
     full -- retrieval is for content *outside* it, per the spec's Context
     Budget section).
     """
-    vector = embed(embed_model, fn_source)
+    vector = embed(embed_model, fn_source, base_url)
     rows = store.query(vector, OVERFETCH)
     kept = [row for row in rows if not _overlaps(rel_fname, start_line, end_line, row)]
     return [

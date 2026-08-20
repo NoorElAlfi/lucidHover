@@ -1,5 +1,5 @@
 import { ExplanationCache, CacheRow } from './cache/explanationCache';
-import { EMBEDDING_MODEL_ID, MODEL_ID, PROMPT_VERSION } from './cache/config';
+import { EMBEDDING_MODEL_ID, PROMPT_VERSION, resolveModelId } from './cache/config';
 import { computeCacheKey } from './cache/hash';
 import { ResolvedFunction } from './functionResolution';
 import { SidecarManager } from './sidecar/sidecarManager';
@@ -28,6 +28,12 @@ export async function generateAndCache(
     cache: ExplanationCache,
     target: GenerationTarget
 ): Promise<CacheRow> {
+    // Resolved once per call (not imported as a constant) so a user override
+    // via `lucidHover.modelId` (Build Order step 14) takes effect on the very
+    // next generation, and the sidecar request / cache-key / cache-row all
+    // agree on the same value -- see cache/config.ts's `resolveModelId` doc.
+    const modelId = resolveModelId();
+
     const result = await sidecar.request<{
         context_hash: string;
         context_tier: string;
@@ -39,7 +45,7 @@ export async function generateAndCache(
             name: target.name,
             line: target.range.start.line,
             fn_source: target.fnSource,
-            model_id: MODEL_ID,
+            model_id: modelId,
         },
         GENERATE_TIMEOUT_MS
     );
@@ -48,7 +54,7 @@ export async function generateAndCache(
         cache_key: computeCacheKey({
             fnSource: target.fnSource,
             contextHash: result.context_hash,
-            modelId: MODEL_ID,
+            modelId,
             embeddingModelId: EMBEDDING_MODEL_ID,
             promptVersion: PROMPT_VERSION,
         }),
@@ -56,7 +62,7 @@ export async function generateAndCache(
         explanation_json: JSON.stringify(result.explanation),
         fn_hash: target.fnHash,
         context_hash: result.context_hash,
-        model_id: MODEL_ID,
+        model_id: modelId,
         embedding_model_id: EMBEDDING_MODEL_ID,
         prompt_version: PROMPT_VERSION,
         context_tier: result.context_tier,

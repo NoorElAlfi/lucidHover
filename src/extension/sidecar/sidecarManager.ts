@@ -72,6 +72,11 @@ export class SidecarManager implements vscode.Disposable {
     private readonly extensionRoot: string;
     private readonly storageDir: string;
     private readonly embeddingModelId: string;
+    // Not readonly, unlike the spawn-time values above: `applyOllamaEndpoint`
+    // (Build Order step 14) updates this and respawns, since there's no
+    // per-request path for it the way `model_id` has (see cache/config.ts's
+    // `resolveOllamaEndpoint` doc for why it can't be per-request).
+    private ollamaBaseUrl: string;
     private readonly output: vscode.OutputChannel;
 
     private childProcess: cp.ChildProcess | null = null;
@@ -89,12 +94,14 @@ export class SidecarManager implements vscode.Disposable {
         extensionRoot: string,
         storageDir: string,
         embeddingModelId: string,
+        ollamaBaseUrl: string,
         output: vscode.OutputChannel
     ) {
         this.workspaceRoot = workspaceRoot;
         this.extensionRoot = extensionRoot;
         this.storageDir = storageDir;
         this.embeddingModelId = embeddingModelId;
+        this.ollamaBaseUrl = ollamaBaseUrl;
         this.output = output;
     }
 
@@ -102,13 +109,23 @@ export class SidecarManager implements vscode.Disposable {
         const address = computeAddress();
         this.log(`spawning sidecar (address=${address}, root=${this.workspaceRoot})`);
 
-        // `storageDir`/`embeddingModelId` (Session 11): spawn-time, not
-        // per-request, params -- see cache/config.ts's EMBEDDING_MODEL_ID
-        // doc comment for why the retrieval tier needs these known before
-        // the sidecar's startup embedding pass runs, ahead of any RPC call.
+        // `storageDir`/`embeddingModelId` (Session 11) and `ollamaBaseUrl`
+        // (Build Order step 14): spawn-time, not per-request, params -- see
+        // cache/config.ts's EMBEDDING_MODEL_ID / resolveOllamaEndpoint doc
+        // comments for why the retrieval tier and the custom-endpoint tier
+        // both need these known before the sidecar's startup embedding pass
+        // runs, ahead of any RPC call.
         const child = cp.spawn(
             'python',
-            ['-m', 'sidecar.rpc_server', address, this.workspaceRoot, this.storageDir, this.embeddingModelId],
+            [
+                '-m',
+                'sidecar.rpc_server',
+                address,
+                this.workspaceRoot,
+                this.storageDir,
+                this.embeddingModelId,
+                this.ollamaBaseUrl,
+            ],
             { cwd: this.extensionRoot }
         );
         this.childProcess = child;
@@ -172,6 +189,21 @@ export class SidecarManager implements vscode.Disposable {
         this.teardown('dispose');
     }
 
+    /**
+     * Applies a freshly-resolved `lucidHover.ollamaEndpoint` value and
+     * respawns the sidecar with it (Build Order step 14). Backs the
+     * explicit "LucidHover: Restart Sidecar" command -- `ollamaBaseUrl` is
+     * spawn-time config (see the field's own comment above), so there is no
+     * way to change which Ollama daemon the sidecar talks to without a
+     * respawn; this reuses the same teardown-and-`start()` path the
+     * heartbeat's auto-restart already relies on, just with a new value in
+     * place first and triggered explicitly rather than on a failure signal.
+     */
+    async applyOllamaEndpoint(url: string): Promise<void> {
+        this.ollamaBaseUrl = url;
+        await this.restart('applying lucidHover.ollamaEndpoint');
+    }
+
     private onData(chunk: Buffer): void {
         this.buffer += chunk.toString('utf8');
         let idx: number;
@@ -231,18 +263,18 @@ export class SidecarManager implements vscode.Disposable {
                 `heartbeat failed (${this.consecutiveFailures}/${HEARTBEAT_FAILURE_THRESHOLD}): ${String(err)}`
             );
             if (this.consecutiveFailures >= HEARTBEAT_FAILURE_THRESHOLD) {
-                await this.restart();
+                await this.restart('unresponsive');
             }
         }
     }
 
-    private async restart(): Promise<void> {
+    private async restart(reason = 'unresponsive'): Promise<void> {
         if (this.disposed || this.restarting) {
             return;
         }
         this.restarting = true;
-        this.log('sidecar unresponsive -- restarting');
-        this.teardown('unresponsive, restarting');
+        this.log(`sidecar restarting (${reason})`);
+        this.teardown(reason);
         this.consecutiveFailures = 0;
         try {
             await this.start();

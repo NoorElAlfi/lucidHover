@@ -15,6 +15,14 @@ dependency for a single local POST. See session-06 artifact.
 Per the session instructions: if Ollama can't be reached, or the model
 isn't available, this fails loudly with a clear, actionable message. It
 never silently stubs or falls back.
+
+`OLLAMA_BASE_URL` is still the default host every function falls back to,
+but each of `generate_text`/`embed`/`generate_structured` (and `_post`)
+now also accepts an optional `base_url` override (Build Order step 14: the
+custom-Ollama-endpoint tier) -- the extension host resolves and validates
+the real value (`lucidHover.ollamaEndpoint`, loopback-only per Core Rule 1)
+and passes it down from `rpc_server.py`'s spawn-time arg; nothing here
+re-validates it, this module just dials whatever host it's given.
 """
 
 from __future__ import annotations
@@ -32,8 +40,8 @@ class OllamaError(RuntimeError):
     """Raised when Ollama can't be reached, or the requested model isn't available."""
 
 
-def _post(path: str, payload: dict[str, Any]) -> dict[str, Any]:
-    url = f"{OLLAMA_BASE_URL}{path}"
+def _post(path: str, payload: dict[str, Any], base_url: str = OLLAMA_BASE_URL) -> dict[str, Any]:
+    url = f"{base_url}{path}"
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
 
@@ -56,13 +64,15 @@ def _post(path: str, payload: dict[str, Any]) -> dict[str, Any]:
         raise OllamaError(f"Ollama request to {path} failed ({exc.code}): {message}") from exc
     except urllib.error.URLError as exc:
         raise OllamaError(
-            f"Cannot reach Ollama at {OLLAMA_BASE_URL} ({exc.reason}). "
+            f"Cannot reach Ollama at {base_url} ({exc.reason}). "
             f"Is Ollama running? Start it, then retry (e.g. `ollama serve`, "
             f"or launch the Ollama app)."
         ) from exc
 
 
-def generate_text(model: str, system: str, prompt: str, stop: list[str] | None = None) -> str:
+def generate_text(
+    model: str, system: str, prompt: str, stop: list[str] | None = None, base_url: str = OLLAMA_BASE_URL
+) -> str:
     """Unconstrained free-text completion, temperature=0. Used for the Stage A reasoning pass."""
     payload: dict[str, Any] = {
         "model": model,
@@ -73,11 +83,11 @@ def generate_text(model: str, system: str, prompt: str, stop: list[str] | None =
     }
     if stop:
         payload["options"]["stop"] = stop
-    result = _post("/api/generate", payload)
+    result = _post("/api/generate", payload, base_url)
     return result.get("response", "")
 
 
-def embed(model: str, text: str) -> list[float]:
+def embed(model: str, text: str, base_url: str = OLLAMA_BASE_URL) -> list[float]:
     """
     Embedding vector for one chunk of text, via Ollama's `/api/embeddings`
     (Session 11) -- the same local HTTP interface `generate_text`/
@@ -86,14 +96,16 @@ def embed(model: str, text: str) -> list[float]:
     (sentence-transformers, fastembed, etc.). No `temperature`/`stop`
     options -- embeddings aren't a sampling process.
     """
-    result = _post("/api/embeddings", {"model": model, "prompt": text})
+    result = _post("/api/embeddings", {"model": model, "prompt": text}, base_url)
     embedding = result.get("embedding")
     if not isinstance(embedding, list):
         raise OllamaError(f"Ollama returned no embedding for model '{model}': {result!r}")
     return embedding
 
 
-def generate_structured(model: str, system: str, prompt: str, schema: dict[str, Any]) -> dict[str, Any]:
+def generate_structured(
+    model: str, system: str, prompt: str, schema: dict[str, Any], base_url: str = OLLAMA_BASE_URL
+) -> dict[str, Any]:
     """
     Schema-constrained completion, temperature=0, via Ollama's `format`
     param (grammar-constrained decoding) -- structured-output mode, not
@@ -107,7 +119,7 @@ def generate_structured(model: str, system: str, prompt: str, schema: dict[str, 
         "stream": False,
         "options": {"temperature": 0},
     }
-    result = _post("/api/generate", payload)
+    result = _post("/api/generate", payload, base_url)
     response_text = result.get("response", "")
     try:
         return json.loads(response_text)

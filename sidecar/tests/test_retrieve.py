@@ -42,7 +42,7 @@ def test_query_top_k_excludes_chunks_overlapping_the_functions_own_span(tmp_path
             _row("other.js", 0, 5, [0.8, 0.0, 0.0, 0.0], "other-file-chunk"),
         ]
     )
-    monkeypatch.setattr(retrieve_module, "embed", lambda model, text: [1.0, 0.0, 0.0, 0.0])
+    monkeypatch.setattr(retrieve_module, "embed", lambda model, text, base_url=None: [1.0, 0.0, 0.0, 0.0])
 
     results = query_top_k(store, "all-minilm", "function target() {}", "target.js", 5, 10)
 
@@ -53,5 +53,5 @@ def test_query_top_k_excludes_chunks_overlapping_the_functions_own_span(tmp_path
 
 def test_query_top_k_on_empty_store_returns_no_chunks(tmp_path, monkeypatch):
     store = VectorStore(str(tmp_path))
-    monkeypatch.setattr(retrieve_module, "embed", lambda model, text: [0.0, 0.0, 0.0, 0.0])
+    monkeypatch.setattr(retrieve_module, "embed", lambda model, text, base_url=None: [0.0, 0.0, 0.0, 0.0])
     assert query_top_k(store, "all-minilm", "function target() {}", "target.js", 0, 5) == []

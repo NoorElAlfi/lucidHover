@@ -2,7 +2,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { BackgroundFlushManager } from './backgroundFlush';
 import { BackgroundIndexManager, registerCancelBackgroundIndexingCommand } from './backgroundIndex';
-import { EMBEDDING_MODEL_ID } from './cache/config';
+import { DEFAULT_OLLAMA_ENDPOINT, EMBEDDING_MODEL_ID, resolveOllamaEndpoint } from './cache/config';
 import { ExplanationCache } from './cache/explanationCache';
 import { RoleCodeLensProvider } from './codelens/roleCodeLensProvider';
 import { RoleGutterDecorationManager } from './codelens/roleGutterDecorations';
@@ -18,6 +18,8 @@ import {
 import { registerRefreshExplanationCommand } from './refreshExplanationCommand';
 import { SaveReindexManager } from './saveReindex';
 import { SidecarManager } from './sidecar/sidecarManager';
+import { StaleTracker } from './staleTracking';
+import { registerGenerateSummaryDocsCommand } from './summaryDocGenerator';
 import { isWorkspaceTrusted, onDidGrantWorkspaceTrust } from './trust';
 
 let sidecarManager: SidecarManager | null = null;
@@ -27,6 +29,30 @@ let backgroundIndexManager: BackgroundIndexManager | null = null;
 let roleCodeLensProvider: RoleCodeLensProvider | null = null;
 let roleGutterDecorationManager: RoleGutterDecorationManager | null = null;
 let gitHookReindexManager: GitHookReindexManager | null = null;
+
+/**
+ * Resolves `lucidHover.ollamaEndpoint`, surfacing (output channel + a
+ * warning toast) the Core Rule 1 rejection case where the configured value
+ * isn't a local address -- a non-loopback host (including Ollama's own
+ * cloud offering) is never dialed, not even on explicit user request, so
+ * this is the one place that has to tell the user their setting was
+ * overridden rather than silently applied. Shared by `startIndexing()` and
+ * the "Restart Sidecar" command below so both paths report rejection the
+ * same way.
+ */
+function resolveOllamaEndpointAndWarn(output: vscode.OutputChannel): string {
+    const { url, rejectedValue } = resolveOllamaEndpoint();
+    if (rejectedValue) {
+        output.appendLine(
+            `lucidHover.ollamaEndpoint "${rejectedValue}" is not a local address -- LucidHover is fully local ` +
+                `(Core Rule 1) and will not contact it. Falling back to ${DEFAULT_OLLAMA_ENDPOINT}.`
+        );
+        vscode.window.showWarningMessage(
+            `LucidHover: "${rejectedValue}" is not a local Ollama endpoint and was rejected. Using ${DEFAULT_OLLAMA_ENDPOINT} instead.`
+        );
+    }
+    return url;
+}
 
 /**
  * Spawns the sidecar and opens the SQLite cache. Never call this without a
@@ -50,7 +76,15 @@ async function startIndexing(context: vscode.ExtensionContext, output: vscode.Ou
     const storageRoot = context.storageUri ?? context.globalStorageUri;
     await vscode.workspace.fs.createDirectory(storageRoot);
 
-    const manager = new SidecarManager(workspaceRoot, context.extensionPath, storageRoot.fsPath, EMBEDDING_MODEL_ID, output);
+    const ollamaBaseUrl = resolveOllamaEndpointAndWarn(output);
+    const manager = new SidecarManager(
+        workspaceRoot,
+        context.extensionPath,
+        storageRoot.fsPath,
+        EMBEDDING_MODEL_ID,
+        ollamaBaseUrl,
+        output
+    );
     sidecarManager = manager;
     context.subscriptions.push(manager);
 
@@ -106,6 +140,17 @@ export function activate(context: vscode.ExtensionContext): void {
     const output = vscode.window.createOutputChannel('LucidHover');
     context.subscriptions.push(output);
 
+    // On-type dirty-tracking (Session 12) and stale-dependency tracking
+    // (Session 13) -- constructed up front, ahead of the hover provider
+    // below, since the hover provider's freshness badge reads both. Purely
+    // in-memory bookkeeping; registering/constructing them doesn't itself
+    // depend on Workspace Trust (Core Rule 6), same as the hover provider.
+    const dirtyTracker = new DirtyTracker(() => indexedWorkspaceRoot, output);
+    context.subscriptions.push(dirtyTracker);
+
+    const staleTracker = new StaleTracker();
+    context.subscriptions.push(staleTracker);
+
     // Hover provider registers unconditionally -- only indexing/generation
     // are trust-gated (Core Rule 6). Its getters resolve to undefined until
     // startIndexing() finishes, so it renders nothing until then.
@@ -115,6 +160,8 @@ export function activate(context: vscode.ExtensionContext): void {
             () => indexedWorkspaceRoot,
             () => explanationCache ?? undefined,
             () => sidecarManager ?? undefined,
+            () => dirtyTracker,
+            () => staleTracker,
             output
         )
     );
@@ -143,6 +190,8 @@ export function activate(context: vscode.ExtensionContext): void {
             () => indexedWorkspaceRoot,
             () => explanationCache ?? undefined,
             () => sidecarManager ?? undefined,
+            () => dirtyTracker,
+            () => staleTracker,
             panelProvider,
             output
         )
@@ -182,16 +231,10 @@ export function activate(context: vscode.ExtensionContext): void {
         () => indexedWorkspaceRoot,
         () => explanationCache ?? undefined,
         () => sidecarManager ?? undefined,
+        () => staleTracker,
         output
     );
     context.subscriptions.push(saveReindexManager);
-
-    // On-type dirty-tracking (Session 12 / Build Order step 12) -- registers
-    // unconditionally (Core Rule 6, same pattern as above); purely in-memory
-    // bookkeeping, no UI reads it yet. The only consumer is the periodic
-    // flush manager below.
-    const dirtyTracker = new DirtyTracker(() => indexedWorkspaceRoot, output);
-    context.subscriptions.push(dirtyTracker);
 
     // Periodic background flush (Session 12) -- registers unconditionally
     // and starts ticking immediately; each tick is a cheap no-op until
@@ -201,6 +244,7 @@ export function activate(context: vscode.ExtensionContext): void {
         () => explanationCache ?? undefined,
         () => sidecarManager ?? undefined,
         () => dirtyTracker,
+        () => staleTracker,
         output
     );
     context.subscriptions.push(backgroundFlushManager);
@@ -213,6 +257,7 @@ export function activate(context: vscode.ExtensionContext): void {
         () => indexedWorkspaceRoot,
         () => explanationCache ?? undefined,
         () => sidecarManager ?? undefined,
+        () => staleTracker,
         context.workspaceState,
         output
     );
@@ -232,6 +277,42 @@ export function activate(context: vscode.ExtensionContext): void {
     );
     context.subscriptions.push(backgroundIndexManager);
     context.subscriptions.push(registerCancelBackgroundIndexingCommand(backgroundIndexManager));
+
+    // Build Order step 14: `lucidHover.ollamaEndpoint` is spawn-time config
+    // (see cache/config.ts's `resolveOllamaEndpoint` doc), so a user editing
+    // it has no way to make it take effect short of this explicit restart or
+    // a full window reload. Registered unconditionally (Core Rule 6, same
+    // pattern as the other commands above) -- it's a no-op with a status
+    // message if the sidecar was never started (e.g. untrusted workspace).
+    context.subscriptions.push(
+        vscode.commands.registerCommand('lucidhover.restartSidecar', async () => {
+            if (!sidecarManager) {
+                vscode.window.showInformationMessage('LucidHover: sidecar is not running -- nothing to restart.');
+                return;
+            }
+            const ollamaBaseUrl = resolveOllamaEndpointAndWarn(output);
+            output.appendLine(`restarting sidecar to apply lucidHover.ollamaEndpoint = ${ollamaBaseUrl}`);
+            await sidecarManager.applyOllamaEndpoint(ollamaBaseUrl);
+            vscode.window.setStatusBarMessage('LucidHover: sidecar restarted', 3000);
+        })
+    );
+
+    // Secondary summary-doc generator (Session 15 / Build Order step 15,
+    // post-MVP) -- registered unconditionally (Core Rule 6, same pattern as
+    // the other commands above); its own readiness check (workspaceRoot/
+    // cache/sidecar all non-null) lives inside the command handler, same as
+    // "Refresh Explanation". Explicit-command-only: writing real files to
+    // the workspace (docs/wiki/*.md) is a new category of side effect this
+    // extension has never had before, so it needs a real user action, not a
+    // side effect of background indexing finishing.
+    context.subscriptions.push(
+        registerGenerateSummaryDocsCommand(
+            () => indexedWorkspaceRoot,
+            () => explanationCache ?? undefined,
+            () => sidecarManager ?? undefined,
+            output
+        )
+    );
 
     if (isWorkspaceTrusted()) {
         void startIndexing(context, output);
