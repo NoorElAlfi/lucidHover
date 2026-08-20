@@ -8,3 +8,7 @@ __pycache__/
 # Vendored upstream clones kept for reading during porting (e.g. repomap.py) --
 # not first-party code, not meant to enter this repo's own history.
 reference/
+
+# Runtime lock file (session id/pid/timestamp) -- churns on every run, not
+# meant to be version-controlled.
+.claude/scheduled_tasks.lock
