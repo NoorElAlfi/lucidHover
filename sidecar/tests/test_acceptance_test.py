@@ -123,3 +123,27 @@ def test_missing_fields_short_circuit_before_any_notes():
     issues, notes = _check_schema(explanation, ["someCaller"], [])
     assert any("missing field: why_it_exists" in i for i in issues)
     assert notes == []
+
+
+def test_comma_joined_side_effects_is_a_note_not_an_issue():
+    """
+    The bug this field rule/example addition targets: side_effects returned
+    as one comma-joined string instead of several distinct array elements.
+    Both shapes satisfy the JSON schema ("array of strings"), so this is a
+    heuristic note for a human reviewer, not a mechanical schema defect --
+    same issues/notes split as the other heuristic checks in this file.
+    """
+    explanation = _explanation(
+        side_effects=["DB writes, network calls, file I/O, sent messages, mutation of arguments/globals"]
+    )
+    issues, notes = _check_schema(explanation, [], [])
+    assert issues == []
+    assert len(notes) == 1
+    assert "comma-join" in notes[0]
+
+
+def test_granular_side_effects_produce_no_note():
+    explanation = _explanation(side_effects=["writes to the DB", "makes a network call", "writes a file"])
+    issues, notes = _check_schema(explanation, [], [])
+    assert issues == []
+    assert notes == []
