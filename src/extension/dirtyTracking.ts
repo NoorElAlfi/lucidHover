@@ -7,11 +7,12 @@ import { relFileFor, resolveAllFunctions, ResolvedFunction } from './functionRes
  * in-memory bookkeeping this session -- no UI reads this yet (that's Session
  * 13's staleness badge); the only consumer right now is `BackgroundFlushManager`.
  *
- * Keyed by `fnId` (relFile + name + start line), NOT `fn_hash`. `fn_hash` is
- * a hash of the function's *current* source, so it changes on every
- * keystroke that touches the function -- flagging "this exact hash is dirty"
- * would be stale before the next keystroke even lands. `fnId` is the stable
- * slot the cache and every other trigger already key on.
+ * Keyed by `fnId` (relFile + enclosing-scope-qualified name, see
+ * cache/hash.ts computeFnId), NOT `fn_hash`. `fn_hash` is a hash of the
+ * function's *current* source, so it changes on every keystroke that
+ * touches the function -- flagging "this exact hash is dirty" would be
+ * stale before the next keystroke even lands. `fnId` is the stable slot the
+ * cache and every other trigger already key on.
  */
 export class DirtyTracker implements vscode.Disposable {
     // relFile -> dirty fnIds in that file.

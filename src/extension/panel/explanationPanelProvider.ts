@@ -26,9 +26,15 @@ const NAVIGABLE_SYMBOL_KINDS = new Set<vscode.SymbolKind>([
 ]);
 
 function fnNameFromFnId(fnId: string): string {
-    // fn_id = `${relFile}::${name}::${line}` (see cache/hash.ts computeFnId).
+    // fn_id = `${relFile}::${qualifiedName}`, where qualifiedName is a
+    // dot-joined enclosing-scope path optionally suffixed with `#n` for
+    // duplicates (see cache/hash.ts computeFnId / functionResolution.ts
+    // assignFnIds) -- take the last dot segment for a bare display name.
     const parts = fnId.split('::');
-    return parts.length >= 2 ? parts[parts.length - 2] : fnId;
+    const qualifiedName = parts.length >= 2 ? parts[parts.length - 1] : fnId;
+    const withoutOrdinal = qualifiedName.replace(/#\d+$/, '');
+    const segments = withoutOrdinal.split('.');
+    return segments[segments.length - 1] || fnId;
 }
 
 /**
