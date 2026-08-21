@@ -39,7 +39,10 @@ Write this as an actual repeatable test (not just a manual spot-check) during th
 
 ## Core Design Decisions (do not relitigate)
 
-1. Pre-generate, never generate on hover.
+1. Pre-generate is the default path. Hover falls through to on-demand generation only as a narrow,
+   last-resort fallback (Session 9) for a function background indexing hasn't reached yet — see
+   CLAUDE.md's Core Rule 4 for the exact scope. This is not an exception to reach for elsewhere:
+   the docked panel's render path has no such fallback and stays a pure cache lookup, always.
 2. Cache key = `hash(fn_source + context_hashes + model_id + embedding_model_id + prompt_version)`.
 3. Temperature=0 reduces variance, does not guarantee determinism — invalidation is always content-hash-driven, never assumed-safe-to-skip.
 4. Invalidate on content hash, never timestamps.
@@ -242,7 +245,7 @@ No API keys, no cloud providers. **v0 uses the bundled model only** — the cust
 
 ## Explicit Non-Goals (v1, applies to v0 and beyond)
 
-No cross-repo indexing. No resolution into third-party library internals. No live/on-demand regeneration on hover. No semantic/similarity cache matching — exact content-hash only. No BYO API keys, no cloud providers, no Ollama Cloud as default. No variable-level explanations. No diagrams/impact-radius/minimap in v1. Secondary summary docs use template-and-reuse only, no bespoke pipeline. No single-trigger change detection in the full v1 model (v0's debounced-save-only is an explicit, temporary MVP exception, not a contradiction of this rule). No indexing/generation in untrusted workspaces. No proposed/experimental VS Code APIs — stable API surface only.
+No cross-repo indexing. No resolution into third-party library internals. No live/on-demand regeneration on hover as the primary mechanism — pre-generation is the default, with a narrow cache-miss fallback for functions background indexing hasn't reached yet (see Core Design Decision #1). No semantic/similarity cache matching — exact content-hash only. No BYO API keys, no cloud providers, no Ollama Cloud as default. No variable-level explanations. No diagrams/impact-radius/minimap in v1. Secondary summary docs use template-and-reuse only, no bespoke pipeline. No single-trigger change detection in the full v1 model (v0's debounced-save-only is an explicit, temporary MVP exception, not a contradiction of this rule). No indexing/generation in untrusted workspaces. No proposed/experimental VS Code APIs — stable API surface only.
 
 ## Open Items
 

@@ -1,0 +1,34 @@
+# Packaged .vsix contents: only what's needed to run the extension at
+# runtime (out/, sidecar/'s Python source, media/, and node_modules'
+# production deps -- vsce already trims node_modules to production
+# dependencies on its own). Everything else here is dev/test-only and was
+# shipping by accident before this file existed (Build Order step 17's
+# packaging dry-run measured 77.09 MB with no .vscodeignore at all -- the
+# single largest contributor was `reference/` below, at 74.14 MB).
+
+# TypeScript source -- only compiled out/ ships
+src/**
+tsconfig.json
+
+# Dev/test-only content
+.claude/**
+.git/**
+.gitignore
+.mocharc.json
+.pytest_cache/**
+.vscode/**
+.vscode-test/**
+fixtures/**
+reference/**
+scripts/**
+sidecar/tests/**
+package-lock.json
+
+# Docs meant for contributors, not extension users
+CLAUDE.md
+codebase-explainer-vscode-extension.md
+
+# Build/cache artifacts that can end up on disk locally
+**/__pycache__/**
+**/*.pyc
+**/.pytest_cache/**
