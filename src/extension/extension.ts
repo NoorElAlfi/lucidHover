@@ -88,14 +88,18 @@ async function startIndexing(context: vscode.ExtensionContext, output: vscode.Ou
     sidecarManager = manager;
     context.subscriptions.push(manager);
 
-    try {
-        await manager.start();
-        vscode.window.setStatusBarMessage('LucidHover: sidecar connected', 3000);
-    } catch (err) {
-        output.appendLine(`failed to start sidecar: ${String(err)}`);
-        vscode.window.showErrorMessage('LucidHover: failed to start the sidecar process. See the LucidHover output channel.');
+    // Build Order step 16: routes the very first startup attempt through the
+    // same backoff-retry-then-give-up recovery loop as a mid-session crash,
+    // rather than a single unretried attempt -- a Python-not-on-PATH-yet or
+    // Ollama-still-starting-up hiccup gets the same real retry window. On
+    // exhaustion, `restart()`'s own give-up toast already tells the user
+    // what happened and offers a retry action, so there's nothing further to
+    // surface here.
+    const started = await manager.restart('initial startup');
+    if (!started) {
         return;
     }
+    vscode.window.setStatusBarMessage('LucidHover: sidecar connected', 3000);
 
     const dbPath = path.join(storageRoot.fsPath, 'explanation-cache.sqlite');
     explanationCache = new ExplanationCache(dbPath);
@@ -292,8 +296,12 @@ export function activate(context: vscode.ExtensionContext): void {
             }
             const ollamaBaseUrl = resolveOllamaEndpointAndWarn(output);
             output.appendLine(`restarting sidecar to apply lucidHover.ollamaEndpoint = ${ollamaBaseUrl}`);
-            await sidecarManager.applyOllamaEndpoint(ollamaBaseUrl);
-            vscode.window.setStatusBarMessage('LucidHover: sidecar restarted', 3000);
+            const ok = await sidecarManager.applyOllamaEndpoint(ollamaBaseUrl);
+            if (ok) {
+                vscode.window.setStatusBarMessage('LucidHover: sidecar restarted', 3000);
+            }
+            // On failure, `applyOllamaEndpoint`'s underlying recovery loop
+            // already showed its own give-up toast -- nothing further needed.
         })
     );
 

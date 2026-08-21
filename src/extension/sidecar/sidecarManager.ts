@@ -12,6 +12,13 @@ const HEARTBEAT_FAILURE_THRESHOLD = 3;
 const REQUEST_TIMEOUT_MS = 4_000;
 const CONNECT_RETRY_ATTEMPTS = 20;
 const CONNECT_RETRY_DELAY_MS = 250;
+/** Consecutive failed (re)start attempts before the recovery loop gives up and
+ * waits for a manual "Restart Sidecar" instead of retrying forever (Build
+ * Order step 16). */
+const MAX_RESTART_ATTEMPTS = 5;
+/** Exponential backoff between (re)start attempts: 2s, 4s, 8s, 16s, 30s (capped). */
+const RESTART_BACKOFF_BASE_MS = 2_000;
+const RESTART_BACKOFF_MAX_MS = 30_000;
 
 interface PendingRequest {
     resolve: (value: unknown) => void;
@@ -88,6 +95,24 @@ export class SidecarManager implements vscode.Disposable {
     private consecutiveFailures = 0;
     private restarting = false;
     private disposed = false;
+    /** True only while `teardown()` is deliberately killing a still-running
+     * child (an in-progress restart/dispose) -- distinguishes an expected
+     * exit from an unexpected crash for the `child.on('exit', ...)` handler. */
+    private expectedExit = false;
+    /** Consecutive failed (re)start attempts since the last success or the
+     * last manual restart's explicit reset (Build Order step 16). */
+    private restartAttempts = 0;
+    /** True once the recovery loop has hit MAX_RESTART_ATTEMPTS and stopped
+     * auto-retrying; cleared by a manual restart. */
+    private givenUp = false;
+    /** The single in-flight recovery loop, if any -- every restart trigger
+     * (heartbeat, unexpected exit, manual command, initial startup) funnels
+     * through `restart()`, which de-dupes against this rather than letting
+     * concurrent triggers spawn competing loops. */
+    private currentRecovery: Promise<boolean> | null = null;
+    private restartRetryTimer: ReturnType<typeof setTimeout> | null = null;
+    private restartRetrySignal: (() => void) | null = null;
+    private readonly statusBarItem: vscode.StatusBarItem;
 
     constructor(
         workspaceRoot: string,
@@ -103,6 +128,12 @@ export class SidecarManager implements vscode.Disposable {
         this.embeddingModelId = embeddingModelId;
         this.ollamaBaseUrl = ollamaBaseUrl;
         this.output = output;
+
+        // Hidden until the recovery loop actually needs to say something
+        // (Build Order step 16, design question 2) -- a healthy sidecar never
+        // shows this.
+        this.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+        this.statusBarItem.command = 'lucidhover.restartSidecar';
     }
 
     async start(): Promise<void> {
@@ -129,11 +160,25 @@ export class SidecarManager implements vscode.Disposable {
             { cwd: this.extensionRoot }
         );
         this.childProcess = child;
+        this.expectedExit = false;
 
         child.stdout?.on('data', (data: Buffer) => this.log(data.toString('utf8').trimEnd()));
         child.stderr?.on('data', (data: Buffer) => this.log(`[stderr] ${data.toString('utf8').trimEnd()}`));
         child.on('exit', (code, signal) => {
             this.log(`sidecar process exited (code=${code}, signal=${signal})`);
+            // `teardown()` sets `expectedExit` right before it kills a child
+            // itself (a deliberate restart/dispose) -- anything else is an
+            // unexpected crash the recovery loop should react to immediately
+            // rather than waiting for the next heartbeat tick to notice
+            // (Build Order step 16, design question 3). The `childProcess
+            // !== child` check guards against a stale listener on an old
+            // process instance firing after a newer one has already taken
+            // over.
+            if (this.disposed || this.expectedExit || this.childProcess !== child) {
+                return;
+            }
+            this.log('sidecar exited unexpectedly -- triggering recovery');
+            void this.restart('sidecar process exited unexpectedly');
         });
 
         const socket = await connectWithRetry(address);
@@ -186,7 +231,9 @@ export class SidecarManager implements vscode.Disposable {
 
     dispose(): void {
         this.disposed = true;
+        this.cancelPendingRetry();
         this.teardown('dispose');
+        this.statusBarItem.dispose();
     }
 
     /**
@@ -195,13 +242,15 @@ export class SidecarManager implements vscode.Disposable {
      * explicit "LucidHover: Restart Sidecar" command -- `ollamaBaseUrl` is
      * spawn-time config (see the field's own comment above), so there is no
      * way to change which Ollama daemon the sidecar talks to without a
-     * respawn; this reuses the same teardown-and-`start()` path the
-     * heartbeat's auto-restart already relies on, just with a new value in
-     * place first and triggered explicitly rather than on a failure signal.
+     * respawn; this reuses the same recovery loop the heartbeat/exit-driven
+     * auto-restart already relies on, just with a new value in place first,
+     * triggered explicitly, and with the backoff/give-up state reset (Build
+     * Order step 16, design question 4 -- a manual restart is a fresh start,
+     * even if an auto-retry happens to be mid-backoff at that moment).
      */
-    async applyOllamaEndpoint(url: string): Promise<void> {
+    async applyOllamaEndpoint(url: string): Promise<boolean> {
         this.ollamaBaseUrl = url;
-        await this.restart('applying lucidHover.ollamaEndpoint');
+        return this.restart('applying lucidHover.ollamaEndpoint', true);
     }
 
     private onData(chunk: Buffer): void {
@@ -263,27 +312,167 @@ export class SidecarManager implements vscode.Disposable {
                 `heartbeat failed (${this.consecutiveFailures}/${HEARTBEAT_FAILURE_THRESHOLD}): ${String(err)}`
             );
             if (this.consecutiveFailures >= HEARTBEAT_FAILURE_THRESHOLD) {
-                await this.restart('unresponsive');
+                // Fire-and-forget: `restart()` never throws (see below), and
+                // `heartbeatTick` is itself invoked fire-and-forget from the
+                // interval timer, so there's no caller here to hand a result
+                // to.
+                void this.restart('unresponsive');
             }
         }
     }
 
-    private async restart(reason = 'unresponsive'): Promise<void> {
-        if (this.disposed || this.restarting) {
-            return;
+    /**
+     * The single entry point for every restart trigger (heartbeat threshold,
+     * an unexpected `child.on('exit', ...)`, the manual "Restart Sidecar"
+     * command, and -- via `startIndexing()` -- the very first startup
+     * attempt). Never throws; resolves `true` once reconnected, `false` if
+     * the recovery loop gave up after `MAX_RESTART_ATTEMPTS` (Build Order
+     * step 16, design questions 1 and 5).
+     *
+     * De-dupes against `currentRecovery` rather than just no-op'ing on
+     * reentrancy: if a loop is already in flight (mid-attempt, or asleep
+     * between backoff attempts), a concurrent caller wakes it early and
+     * awaits its real eventual outcome instead of either being silently
+     * ignored or spawning a second, competing loop (design question 4).
+     */
+    async restart(reason = 'unresponsive', resetAttempts = false): Promise<boolean> {
+        if (this.disposed) {
+            return false;
         }
-        this.restarting = true;
-        this.log(`sidecar restarting (${reason})`);
-        this.teardown(reason);
-        this.consecutiveFailures = 0;
+        if (resetAttempts) {
+            this.restartAttempts = 0;
+            this.givenUp = false;
+        }
+        if (this.currentRecovery) {
+            this.log(`sidecar restart (${reason}) requested while recovery already in progress -- joining it`);
+            this.cancelPendingRetry();
+            return this.currentRecovery;
+        }
+        const promise = this.runRecoveryLoop(reason);
+        this.currentRecovery = promise;
         try {
-            await this.start();
-            this.log('sidecar restarted successfully');
-        } catch (err) {
-            this.log(`sidecar restart failed: ${String(err)}`);
+            return await promise;
+        } finally {
+            this.currentRecovery = null;
+        }
+    }
+
+    private async runRecoveryLoop(reason: string): Promise<boolean> {
+        this.restarting = true;
+        this.log(`sidecar recovery starting (${reason})`);
+        try {
+            while (!this.disposed) {
+                this.teardown(reason);
+                try {
+                    await this.start();
+                    this.log('sidecar (re)started successfully');
+                    this.restartAttempts = 0;
+                    this.consecutiveFailures = 0;
+                    this.givenUp = false;
+                    this.updateStatusBar();
+                    return true;
+                } catch (err) {
+                    this.restartAttempts++;
+                    this.log(
+                        `sidecar start attempt ${this.restartAttempts}/${MAX_RESTART_ATTEMPTS} failed (${reason}): ${String(err)}`
+                    );
+                    if (this.disposed) {
+                        // `dispose()` raced with this attempt (it can call
+                        // `teardown()` while `start()` is still in flight,
+                        // same as before this session) -- stop instead of
+                        // scheduling a backoff sleep nothing will ever cancel.
+                        return false;
+                    }
+                    if (this.restartAttempts >= MAX_RESTART_ATTEMPTS) {
+                        this.givenUp = true;
+                        this.updateStatusBar();
+                        this.notifyGaveUp(reason);
+                        return false;
+                    }
+                    this.updateStatusBar();
+                    const delay = Math.min(
+                        RESTART_BACKOFF_BASE_MS * 2 ** (this.restartAttempts - 1),
+                        RESTART_BACKOFF_MAX_MS
+                    );
+                    await this.sleep(delay);
+                }
+            }
+            return false;
         } finally {
             this.restarting = false;
         }
+    }
+
+    /** Resolves after `ms`, or immediately if `cancelPendingRetry()` wakes it
+     * early (a manual restart interrupting a backoff wait, or `dispose()`). */
+    private sleep(ms: number): Promise<void> {
+        return new Promise((resolve) => {
+            this.restartRetrySignal = resolve;
+            this.restartRetryTimer = setTimeout(() => {
+                this.restartRetryTimer = null;
+                this.restartRetrySignal = null;
+                resolve();
+            }, ms);
+        });
+    }
+
+    private cancelPendingRetry(): void {
+        if (this.restartRetryTimer) {
+            clearTimeout(this.restartRetryTimer);
+            this.restartRetryTimer = null;
+        }
+        if (this.restartRetrySignal) {
+            const resolve = this.restartRetrySignal;
+            this.restartRetrySignal = null;
+            resolve();
+        }
+    }
+
+    /** Reflects current recovery state in the status bar (Build Order step
+     * 16, design question 2). Hidden while healthy; a low-friction spinner
+     * once a backoff-retry is actually scheduled (already past the
+     * heartbeat's own 3-strike quiet buffer and, for a crash, the first
+     * immediate retry attempt); an explicit error state once the loop has
+     * given up. */
+    private updateStatusBar(): void {
+        if (this.disposed) {
+            return;
+        }
+        if (this.givenUp) {
+            this.statusBarItem.text = '$(error) LucidHover: sidecar down';
+            this.statusBarItem.tooltip = 'The LucidHover sidecar could not be restarted. Click to retry.';
+            this.statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');
+            this.statusBarItem.show();
+        } else if (this.restartAttempts > 0) {
+            this.statusBarItem.text = `$(sync~spin) LucidHover: sidecar restarting (${this.restartAttempts}/${MAX_RESTART_ATTEMPTS})`;
+            this.statusBarItem.tooltip = 'The LucidHover sidecar is recovering from an unexpected exit or unresponsive state.';
+            this.statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+            this.statusBarItem.show();
+        } else {
+            this.statusBarItem.hide();
+        }
+    }
+
+    /** Fires once per give-up episode -- the one point auto-recovery has
+     * actually stopped and a toast (rather than the ambient status bar) is
+     * warranted (design question 2). Offers a direct action back into the
+     * existing "LucidHover: Restart Sidecar" command. */
+    private notifyGaveUp(reason: string): void {
+        if (this.disposed) {
+            return;
+        }
+        this.log(`sidecar recovery gave up after ${MAX_RESTART_ATTEMPTS} attempts (${reason})`);
+        void vscode.window
+            .showErrorMessage(
+                `LucidHover: the sidecar process could not be restarted after ${MAX_RESTART_ATTEMPTS} attempts. ` +
+                    'Indexing and explanation updates are paused. See the LucidHover output channel for details.',
+                'Restart Sidecar'
+            )
+            .then((choice) => {
+                if (choice === 'Restart Sidecar') {
+                    void vscode.commands.executeCommand('lucidhover.restartSidecar');
+                }
+            });
     }
 
     private teardown(reason: string): void {
@@ -297,6 +486,9 @@ export class SidecarManager implements vscode.Disposable {
             this.socket = null;
         }
         if (this.childProcess && this.childProcess.exitCode === null && !this.childProcess.killed) {
+            // Tell the exit handler this kill is deliberate (a restart or
+            // dispose tearing down the old process), not a crash to react to.
+            this.expectedExit = true;
             this.childProcess.kill();
         }
         this.childProcess = null;
