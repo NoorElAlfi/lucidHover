@@ -144,6 +144,16 @@ def _check_schema(
         if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
             issues.append(f"{field} is not a list of strings")
 
+    side_effects = explanation.get("side_effects")
+    if isinstance(side_effects, list):
+        for effect in side_effects:
+            if isinstance(effect, str) and effect.count(",") >= 2:
+                notes.append(
+                    f"side_effects element looks like it may comma-join multiple distinct "
+                    f"effects into one array element instead of splitting them (see "
+                    f"prompt.py's side_effects field rule): '{effect}'"
+                )
+
     if explanation["risk_note"] is not None and not isinstance(explanation["risk_note"], str):
         issues.append("risk_note is neither a string nor null")
 

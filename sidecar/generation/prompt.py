@@ -1,6 +1,6 @@
 """
 Few-shot prompt construction (Session 6), per the spec's "Output Schema +
-Prompt Design" section: a system instruction with the field rules, 2 worked
+Prompt Design" section: a system instruction with the field rules, worked
 examples each showing a `Reasoning:` step before the JSON, then the real
 input slot (`fn_source`/`caller_names`/`callee_names`/`context_bundle`)
 ending in `Reasoning:` as a prompt continuation.
@@ -41,8 +41,14 @@ group with no names at all just because the list is long. If there are no caller
 given, say so plainly rather than inventing a reason.
 - used_by: the caller names, exactly as given -- do not shorten, rename, or add names not given.
 - calls: the callee names, exactly as given -- same rule.
-- side_effects: only effects you can actually see in the function body (DB writes, network calls, \
-file I/O, sent messages, mutation of arguments/globals). Empty array if none -- never invent one.
+- side_effects: describe, in your own words, only effects you can actually verify happen in THIS \
+function's body -- for example a database write, a network/API call, reading or writing a file, \
+sending a message or notification, or mutating a parameter or global. That list names the *kinds* \
+of thing to look for, not fixed text to output -- never copy it verbatim into your answer; ground \
+each entry in what this specific function's code does. Every distinct effect you find is its own \
+array element -- if the function has three effects, output three separate strings, never one \
+string joining them together with commas. Empty array if none -- never invent one, and never list \
+a category just because it was mentioned above if this function doesn't actually do it.
 - risk_note: only a genuine correctness/safety concern visible from the given source and \
 callers/callees (e.g. a caller that skips a check this function relies on). null if none -- do \
 not speculate or manufacture a risk to fill the field.
@@ -211,7 +217,63 @@ _EXAMPLE_3 = FewShotExample(
     },
 )
 
-FEW_SHOT_EXAMPLES = [_EXAMPLE_1, _EXAMPLE_2, _EXAMPLE_3]
+_EXAMPLE_4 = FewShotExample(
+    fn_source=(
+        "function syncUserRecord(user, cache) {\n"
+        "  fileWriter.appendSync('sync.log', `sync ${user.id}\\n`);\n"
+        "  db.updateUser(user.id, { lastSynced: Date.now() });\n"
+        "  notificationClient.push(user.id, 'Profile synced');\n"
+        "  analyticsClient.track('user_synced', { userId: user.id });\n"
+        "  cache.lastSync = Date.now();\n"
+        "}"
+    ),
+    caller_names=["userSyncJob"],
+    callee_names=["fileWriter.appendSync", "db.updateUser", "notificationClient.push", "analyticsClient.track"],
+    context_bundle=(
+        "Callers (1):\n"
+        "  - userSyncJob (jobs/userSync.js:10)\n"
+        "Callees (4):\n"
+        "  - fileWriter.appendSync (utils/fileWriter.js:6)\n"
+        "  - db.updateUser (db.js:44)\n"
+        "  - notificationClient.push (notifications/client.js:22)\n"
+        "  - analyticsClient.track (analytics/client.js:15)"
+    ),
+    reasoning=(
+        "This function is called from userSyncJob, a background sync job. In its body it appends "
+        "a line to a local file via fileWriter.appendSync (file I/O), writes updated sync state to "
+        "the DB via db.updateUser (a DB write), sends a push notification via "
+        "notificationClient.push (a sent message), reports the event to an external analytics "
+        "service via analyticsClient.track (a network call), and directly mutates the cache "
+        "argument's lastSync field (mutation of an argument). That's five distinct effects across "
+        "five different categories, so side_effects needs five separate array elements -- "
+        "collapsing them into one comma-joined string would hide that this function touches the "
+        "filesystem, the DB, a notification service, and an external network endpoint, and "
+        "mutates its caller's cache object, each of which a caller needs to know about "
+        "independently. No missing checks or risky caller behavior is visible here, so no risk to "
+        "flag."
+    ),
+    explanation={
+        "role_tag": "Worker",
+        "one_liner": "Syncs a user's record by writing to the DB, log file, and cache, then notifying the user and reporting the event to analytics.",
+        "why_it_exists": (
+            "Called by userSyncJob, a background sync job, to keep a user's persisted state, "
+            "local log, and in-memory cache all consistent after a sync, while also notifying the "
+            "user and reporting the sync to analytics."
+        ),
+        "used_by": ["userSyncJob"],
+        "calls": ["fileWriter.appendSync", "db.updateUser", "notificationClient.push", "analyticsClient.track"],
+        "side_effects": [
+            "writes a line to a local log file",
+            "writes updated sync state to the DB",
+            "sends a push notification to the user",
+            "makes a network call to an external analytics service",
+            "mutates the cache argument's lastSync field",
+        ],
+        "risk_note": None,
+    },
+)
+
+FEW_SHOT_EXAMPLES = [_EXAMPLE_1, _EXAMPLE_2, _EXAMPLE_3, _EXAMPLE_4]
 
 
 TOP_K_HIGHLIGHT = 3
