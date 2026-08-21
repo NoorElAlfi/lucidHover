@@ -39,13 +39,13 @@ function computeAddress(): string {
     return path.join(os.tmpdir(), `${id}.sock`);
 }
 
-function connectWithRetry(address: string): Promise<net.Socket> {
+function connectWithRetry(address: string, connectFn: typeof net.connect): Promise<net.Socket> {
     return new Promise((resolve, reject) => {
         let attempt = 0;
 
         const tryConnect = () => {
             attempt++;
-            const socket = net.connect(address);
+            const socket = connectFn(address);
 
             const onError = (err: Error) => {
                 socket.removeAllListeners();
@@ -113,6 +113,17 @@ export class SidecarManager implements vscode.Disposable {
     private restartRetryTimer: ReturnType<typeof setTimeout> | null = null;
     private restartRetrySignal: (() => void) | null = null;
     private readonly statusBarItem: vscode.StatusBarItem;
+    // Injectable seams for `child_process.spawn`/`net.connect`, defaulting to
+    // the real functions -- every production call site (`extension.ts`)
+    // relies on the defaults and is unaffected. Added for Build Order step 17:
+    // the Extension Development Host's `child_process`/`net` module exports
+    // turned out to have non-configurable property descriptors, so sinon
+    // cannot monkey-patch them there (`sinon.stub(cp, 'spawn')` throws
+    // "non-configurable and non-writable"); constructor injection sidesteps
+    // that entirely rather than fighting the platform, letting
+    // `sidecarManager.test.ts` pass plain stub functions straight in.
+    private readonly spawnFn: typeof cp.spawn;
+    private readonly connectFn: typeof net.connect;
 
     constructor(
         workspaceRoot: string,
@@ -120,7 +131,9 @@ export class SidecarManager implements vscode.Disposable {
         storageDir: string,
         embeddingModelId: string,
         ollamaBaseUrl: string,
-        output: vscode.OutputChannel
+        output: vscode.OutputChannel,
+        spawnFn: typeof cp.spawn = cp.spawn,
+        connectFn: typeof net.connect = net.connect
     ) {
         this.workspaceRoot = workspaceRoot;
         this.extensionRoot = extensionRoot;
@@ -128,6 +141,8 @@ export class SidecarManager implements vscode.Disposable {
         this.embeddingModelId = embeddingModelId;
         this.ollamaBaseUrl = ollamaBaseUrl;
         this.output = output;
+        this.spawnFn = spawnFn;
+        this.connectFn = connectFn;
 
         // Hidden until the recovery loop actually needs to say something
         // (Build Order step 16, design question 2) -- a healthy sidecar never
@@ -146,7 +161,7 @@ export class SidecarManager implements vscode.Disposable {
         // comments for why the retrieval tier and the custom-endpoint tier
         // both need these known before the sidecar's startup embedding pass
         // runs, ahead of any RPC call.
-        const child = cp.spawn(
+        const child = this.spawnFn(
             'python',
             [
                 '-m',
@@ -181,7 +196,7 @@ export class SidecarManager implements vscode.Disposable {
             void this.restart('sidecar process exited unexpectedly');
         });
 
-        const socket = await connectWithRetry(address);
+        const socket = await connectWithRetry(address, this.connectFn);
         this.socket = socket;
         this.buffer = '';
         socket.on('data', (chunk: Buffer) => this.onData(chunk));

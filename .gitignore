@@ -1,6 +1,8 @@
 out/
 node_modules/
 *.vsix
+dist/
+.vscode-test/
 __pycache__/
 .pytest_cache/
 *.pyc
