@@ -1,0 +1,23 @@
+{
+  "javascript": {
+    "displayName": "JavaScript",
+    "vscodeLanguageId": "javascript",
+    "extensions": [".js", ".jsx"],
+    "treeSitter": {
+      "grammarPackage": "tree_sitter_javascript",
+      "grammarFunction": "language"
+    },
+    "tagQueryFile": "javascript_tags.scm",
+    "exclusions": {
+      "dirs": ["node_modules", "out", "dist", "build"],
+      "defNames": ["constructor"],
+      "refNames": ["require"]
+    },
+    "resolutionStrategy": "tree-sitter-only",
+    "captureKindMap": {
+      "definition.function": "function",
+      "definition.method": "function",
+      "reference.call": "call"
+    }
+  }
+}
