@@ -4,9 +4,17 @@ function sha256(input: string): string {
     return crypto.createHash('sha256').update(input, 'utf8').digest('hex');
 }
 
-/** Stable identity for a function across hovers -- not part of the hash, just the lookup row key. */
-export function computeFnId(relFname: string, name: string, line: number): string {
-    return `${relFname}::${name}::${line}`;
+/**
+ * Stable identity for a function across hovers -- not part of the hash, just
+ * the lookup row key. `qualifiedName` is built by functionResolution.ts from
+ * the symbol's enclosing-scope path (e.g. "ClassName.methodName"), not an
+ * absolute line number: a line number shifts for every function below an
+ * unrelated edit earlier in the same file, which would otherwise turn a
+ * byte-for-byte-unchanged function into a spurious cache miss (and orphan
+ * its old row) on every edit that changes the file's line count.
+ */
+export function computeFnId(relFname: string, qualifiedName: string): string {
+    return `${relFname}::${qualifiedName}`;
 }
 
 /**
