@@ -25,7 +25,7 @@ Options:
                            (default: ./acceptance_report.md).
 
 Example:
-    python scripts/acceptance_test.py fixtures/sample-repo/repomap \\
+    python scripts/acceptance_test.py fixtures/javascript/repomap \\
         --model qwen2.5-coder:1.5b --limit 15
 """
 

@@ -9,6 +9,7 @@ import { RoleGutterDecorationManager } from './codelens/roleGutterDecorations';
 import { DirtyTracker } from './dirtyTracking';
 import { GitHookReindexManager, registerInstallGitHooksCommand } from './gitHookReindex';
 import { ExplanationHoverProvider } from './hover/functionHoverProvider';
+import { documentSelectorForSupportedLanguages } from './languages';
 import {
     EXPLANATION_PANEL_VIEW_ID,
     ExplanationPanelProvider,
@@ -159,7 +160,7 @@ export function activate(context: vscode.ExtensionContext): void {
     // are trust-gated (Core Rule 6). Its getters resolve to undefined until
     // startIndexing() finishes, so it renders nothing until then.
     const hoverProvider = vscode.languages.registerHoverProvider(
-        { language: 'javascript' },
+        documentSelectorForSupportedLanguages(),
         new ExplanationHoverProvider(
             () => indexedWorkspaceRoot,
             () => explanationCache ?? undefined,
@@ -217,7 +218,7 @@ export function activate(context: vscode.ExtensionContext): void {
     );
     context.subscriptions.push(roleCodeLensProvider);
     context.subscriptions.push(
-        vscode.languages.registerCodeLensProvider({ language: 'javascript' }, roleCodeLensProvider)
+        vscode.languages.registerCodeLensProvider(documentSelectorForSupportedLanguages(), roleCodeLensProvider)
     );
 
     roleGutterDecorationManager = new RoleGutterDecorationManager(

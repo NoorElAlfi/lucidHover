@@ -7,7 +7,7 @@
             "request": "launch",
             "args": [
                 "--extensionDevelopmentPath=${workspaceFolder}",
-                "${workspaceFolder}/fixtures/sample-repo"
+                "${workspaceFolder}/fixtures/javascript"
             ],
             "outFiles": [
                 "${workspaceFolder}/out/**/*.js"

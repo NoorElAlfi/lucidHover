@@ -4,6 +4,7 @@ import { EMBEDDING_MODEL_ID, PROMPT_VERSION, resolveModelId } from './cache/conf
 import { KeyedDebouncer } from './debounce';
 import { relFileFor, ResolvedFunction, resolveAllFunctions } from './functionResolution';
 import { generateAndCache } from './generation';
+import { isSupportedLanguageId } from './languages';
 import { SidecarManager } from './sidecar/sidecarManager';
 import { flagStaleDependents, StaleTracker } from './staleTracking';
 
@@ -43,7 +44,7 @@ export class SaveReindexManager implements vscode.Disposable {
     }
 
     private onSave(document: vscode.TextDocument): void {
-        if (document.languageId !== 'javascript') {
+        if (!isSupportedLanguageId(document.languageId)) {
             return;
         }
         // Keyed per document so unrelated files debounce independently, and

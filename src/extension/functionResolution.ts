@@ -10,6 +10,25 @@ import { computeFnHash, computeFnId } from './cache/hash';
  * resolves *what function* the cursor is on.
  */
 
+/**
+ * The one seam where a document's symbols enter this module (Session 22).
+ * Everything below -- qualified-name derivation, fnId assignment,
+ * `isFunctionLike` -- consumes only the `vscode.DocumentSymbol[]` this
+ * returns and never itself calls a symbol-provider command. Whether this
+ * stays `vscode.executeDocumentSymbolProvider` or becomes something else
+ * (e.g. an LSP-wrapped adapter, per Core Rule 3) is a decision explicitly
+ * deferred to the Python adapter session (session-20 audit, Section 4) --
+ * this function is just the single place that decision would land, so it
+ * doesn't also become a rewrite of the derivation logic below it.
+ */
+async function getDocumentSymbols(document: vscode.TextDocument): Promise<vscode.DocumentSymbol[]> {
+    const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
+        'vscode.executeDocumentSymbolProvider',
+        document.uri
+    );
+    return symbols ?? [];
+}
+
 export function isFunctionLike(symbol: vscode.DocumentSymbol): boolean {
     if (
         symbol.kind === vscode.SymbolKind.Function ||
@@ -141,11 +160,8 @@ export async function resolveEnclosingFunction(
     position: vscode.Position,
     workspaceRoot: string
 ): Promise<ResolvedFunction | undefined> {
-    const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
-        'vscode.executeDocumentSymbolProvider',
-        document.uri
-    );
-    if (!symbols || symbols.length === 0) {
+    const symbols = await getDocumentSymbols(document);
+    if (symbols.length === 0) {
         return undefined;
     }
 
@@ -174,11 +190,8 @@ export async function resolveAllFunctions(
     document: vscode.TextDocument,
     workspaceRoot: string
 ): Promise<ResolvedFunction[]> {
-    const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
-        'vscode.executeDocumentSymbolProvider',
-        document.uri
-    );
-    if (!symbols || symbols.length === 0) {
+    const symbols = await getDocumentSymbols(document);
+    if (symbols.length === 0) {
         return [];
     }
 

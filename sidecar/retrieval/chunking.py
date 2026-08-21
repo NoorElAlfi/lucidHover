@@ -5,8 +5,9 @@ section calls "top-k retrieved chunks" -- content outside what the
 call-graph tier (own source + ranked caller/callee signatures) already
 covers.
 
-Reuses `repomap.extraction.find_js_files` (same `EXCLUDED_DIRS` walk the
-call-graph indexer already uses) rather than a second file walker, then
+Reuses `repomap.extraction.find_source_files` (same `EXCLUDED_DIRS` walk the
+call-graph indexer already uses, across every registered language -- Session
+24) rather than a second file walker, then
 layers `.gitignore` filtering on top via `pathspec` -- Continue.dev's
 convention per the spec's "OSS to Borrow" table. `pathspec` (not a
 hand-rolled matcher) because gitignore glob semantics (`**`, negation,
@@ -35,7 +36,7 @@ from dataclasses import dataclass
 
 import pathspec
 
-from ..repomap.extraction import find_js_files
+from ..repomap.extraction import find_source_files
 
 CHUNK_LINES = 12
 GITIGNORE_FILENAME = ".gitignore"
@@ -70,10 +71,10 @@ def _chunk_file_text(rel_fname: str, text: str) -> list[Chunk]:
 
 
 def chunk_repo(root: str) -> list[Chunk]:
-    """Chunks every non-gitignored JS file under root."""
+    """Chunks every non-gitignored, registered-language source file under root."""
     spec = _load_gitignore_spec(root)
     chunks: list[Chunk] = []
-    for fname in find_js_files(root):
+    for fname in find_source_files(root):
         rel_fname = os.path.relpath(fname, root).replace(os.sep, "/")
         if spec is not None and spec.match_file(rel_fname):
             continue
@@ -82,7 +83,7 @@ def chunk_repo(root: str) -> list[Chunk]:
 
 
 def chunk_file(root: str, rel_fname: str) -> list[Chunk]:
-    """Chunks one already-known-included JS file. Used by the save-triggered re-embed path."""
+    """Chunks one already-known-included source file. Used by the save-triggered re-embed path."""
     fname = os.path.join(root, rel_fname)
     if not os.path.isfile(fname):
         return []

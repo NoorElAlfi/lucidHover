@@ -148,6 +148,9 @@ value, not a placeholder to be renamed later.
 | 19 | `side_effects` granularity fix (prompt/schema bug fix, not a build-order step) | fix | Core | complete | [session-19-side-effects-granularity-fix.md](.claude/sessions/session-19-side-effects-granularity-fix.md) |
 | 20 | Language-surface audit and manifest design | audit | Core | complete | [session-20-language-surface-audit.md](.claude/sessions/session-20-language-surface-audit.md) |
 | 21 | Sidecar-side Language Adapter interface and registry | milestone | Core | complete | [session-21-language-adapter-interface.md](.claude/sessions/session-21-language-adapter-interface.md) |
+| 22 | Extension-host language surface (manifest-driven selectors/guards) | milestone | Core | complete | [session-22-extension-host-language-surface.md](.claude/sessions/session-22-extension-host-language-surface.md) |
+| 23 | Test-harness and fixture parameterisation | milestone | Core | complete | [session-23-fixture-parameterisation.md](.claude/sessions/session-23-fixture-parameterisation.md) |
+| 24 | TypeScript adapter and fixture (second supported language) | milestone | Core | complete | [session-24-typescript-adapter-and-fixture.md](.claude/sessions/session-24-typescript-adapter-and-fixture.md) |
 
 ## File ownership (avoid overlapping edits across parallel work)
 
@@ -165,7 +168,7 @@ value, not a placeholder to be renamed later.
 | Embeddings + retrieval | `sidecar/retrieval/` |
 | Sidecar-side context-hash helper | `sidecar/cache/` |
 | Tests | `src/extension/__tests__/`, `sidecar/tests/` |
-| Fixture repo for testing | `fixtures/sample-repo/` |
+| Fixture repos for testing | `fixtures/` — one dir per language id (`fixtures/<language>/`, e.g. `fixtures/javascript/`); see `fixtures/REQUIREMENTS.md` |
 | Acceptance + utility scripts | `scripts/` |
 | Activation + contributed language surface | `package.json` |
 | Session artifacts | `.claude/sessions/` |

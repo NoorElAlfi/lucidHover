@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { ExplanationCache } from '../cache/explanationCache';
 import { EMBEDDING_MODEL_ID, PROMPT_VERSION, resolveModelId } from '../cache/config';
 import { resolveAllFunctions } from '../functionResolution';
+import { isSupportedLanguageId } from '../languages';
 import { ALL_ROLE_CATEGORIES, categoryIconFile, classifyRoleTag, PENDING_ICON_FILE, RoleCategory } from './roleCategory';
 
 type DecorationKey = RoleCategory | 'pending';
@@ -65,7 +66,7 @@ export class RoleGutterDecorationManager implements vscode.Disposable {
     }
 
     private async refreshEditor(editor: vscode.TextEditor): Promise<void> {
-        if (editor.document.languageId !== 'javascript') {
+        if (!isSupportedLanguageId(editor.document.languageId)) {
             return;
         }
 

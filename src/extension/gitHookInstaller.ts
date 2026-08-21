@@ -1,5 +1,6 @@
 import * as fsp from 'fs/promises';
 import * as path from 'path';
+import { allSupportedExtensions } from './languages';
 
 /**
  * Pure git-hook-file manipulation, no `vscode` dependency (Session 12,
@@ -18,20 +19,31 @@ export const HOOK_BEGIN_MARKER = '# >>> LucidHover git-hook >>>';
 export const HOOK_END_MARKER = '# <<< LucidHover git-hook <<<';
 export const SHARED_SCRIPT_NAME = 'lucidhover-git-reindex.sh';
 
-// Written and fully owned by LucidHover (unlike the three hook entry points
-// below, nothing else would ever want to write to this file), so it's safe
-// to just overwrite on every install/re-activation rather than append-guard
-// it. Resolves `git rev-parse --git-dir` itself rather than assuming
-// `.git/hooks`, so it still works if a hook ever runs from a worktree.
-export const SHARED_SCRIPT_CONTENT = `#!/bin/sh
+/**
+ * Written and fully owned by LucidHover (unlike the three hook entry points
+ * below, nothing else would ever want to write to this file), so it's safe
+ * to just overwrite on every install/re-activation rather than append-guard
+ * it. Resolves `git rev-parse --git-dir` itself rather than assuming
+ * `.git/hooks`, so it still works if a hook ever runs from a worktree.
+ *
+ * The `git diff` pathspec is generated from `languages.json`'s extensions
+ * (Session 22 -- previously a hardcoded `'*.js'` literal, one of three
+ * independently-drifted copies of the same filter per session-20's audit)
+ * so a language added to the manifest is picked up here too, with no edit
+ * to this file.
+ */
+export function buildSharedScriptContent(extensions: string[] = allSupportedExtensions()): string {
+    const pathspecs = extensions.map((ext) => `'*${ext}'`).join(' ');
+    return `#!/bin/sh
 # Written by LucidHover. Safe to regenerate -- diffs the two given refs and
-# writes the changed *.js files (repo-relative, one per line) to the marker
-# file the extension watches.
+# writes the changed source files (repo-relative, one per line) to the
+# marker file the extension watches.
 old="$1"
 new="$2"
 git_dir=$(git rev-parse --git-dir 2>/dev/null) || exit 0
-git diff --name-only "$old" "$new" -- '*.js' > "$git_dir/LUCIDHOVER_REINDEX" 2>/dev/null
+git diff --name-only "$old" "$new" -- ${pathspecs} > "$git_dir/LUCIDHOVER_REINDEX" 2>/dev/null
 `;
+}
 
 export interface HookSpec {
     file: string;
@@ -147,7 +159,7 @@ export async function installOneHook(workspaceRoot: string, spec: HookSpec, outp
 
 export async function installSharedScript(workspaceRoot: string, output: SimpleLogger): Promise<void> {
     const scriptPath = path.join(hooksDir(workspaceRoot), SHARED_SCRIPT_NAME);
-    await fsp.writeFile(scriptPath, SHARED_SCRIPT_CONTENT, 'utf8');
+    await fsp.writeFile(scriptPath, buildSharedScriptContent(), 'utf8');
     await chmodExecutable(scriptPath, output);
 }
 
