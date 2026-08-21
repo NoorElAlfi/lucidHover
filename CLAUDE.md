@@ -106,6 +106,7 @@ detail. Detail lives in the artifact.
 | 13 | Staleness indicator UI (freshness badge) | complete | [session-13-staleness-badge.md](.claude/sessions/session-13-staleness-badge.md) |
 | 14 | Custom local Ollama endpoint tier | complete | [session-14-custom-ollama-endpoint.md](.claude/sessions/session-14-custom-ollama-endpoint.md) |
 | 15 | Secondary summary-doc generator | complete | [session-15-summary-doc-generator.md](.claude/sessions/session-15-summary-doc-generator.md) |
+| 16 | Sidecar crash-recovery hardening | complete | [session-16-crash-recovery-hardening.md](.claude/sessions/session-16-crash-recovery-hardening.md) |
 
 ## File ownership (avoid overlapping edits across parallel work)
 
