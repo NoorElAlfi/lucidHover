@@ -19,8 +19,14 @@ Definition of Done section defines the current milestone scope until it passes i
    (post-MVP) follow Continue.dev's convention. Cross-file resolution (post-MVP) wraps existing
    LSP servers (Serena's pattern). Do not write a custom PageRank ranker, embeddings pipeline, or
    LSP client from scratch.
-4. **Hover is a cache lookup only.** Never call an LLM synchronously from the hover provider path
-   or the docked webview panel's render path.
+4. **Hover is a cache lookup first.** On a cache hit, hover renders directly from the cached row —
+   it must never touch the sidecar. On a cache miss, hover falls through to a synchronous
+   `generate_explanation` call as a deliberate, narrow fallback (decided in Session 9, confirmed
+   still in effect in Session 17) for functions background indexing hasn't reached yet —
+   background indexing exists to make this fallback rare in practice, not to make it structurally
+   impossible. This exception is scoped to hover's cache-miss path only: the docked webview
+   panel's render path has no such exception and must always be a pure cache lookup, never a
+   synchronous LLM call.
 5. **Cache key = hash(fn_source + context_hashes + model_id + embedding_model_id + prompt_version).**
    Any change to context composition, model, or prompt template must be reflected in this key.
 6. **Gate everything behind Workspace Trust.** Sidecar spawn, indexing, and generation must check
@@ -107,6 +113,7 @@ detail. Detail lives in the artifact.
 | 14 | Custom local Ollama endpoint tier | complete | [session-14-custom-ollama-endpoint.md](.claude/sessions/session-14-custom-ollama-endpoint.md) |
 | 15 | Secondary summary-doc generator | complete | [session-15-summary-doc-generator.md](.claude/sessions/session-15-summary-doc-generator.md) |
 | 16 | Sidecar crash-recovery hardening | complete | [session-16-crash-recovery-hardening.md](.claude/sessions/session-16-crash-recovery-hardening.md) |
+| 17 | Full unit + integration test suite, packaging dry-run | complete | [session-17-test-suite-and-packaging.md](.claude/sessions/session-17-test-suite-and-packaging.md) |
 
 ## File ownership (avoid overlapping edits across parallel work)
 
