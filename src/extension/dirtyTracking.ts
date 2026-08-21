@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { relFileFor, resolveAllFunctions, ResolvedFunction } from './functionResolution';
+import { isSupportedLanguageId } from './languages';
 
 /**
  * On-type dirty-tracking (Session 12 / Build Order step 12, first of the
@@ -43,7 +44,7 @@ export class DirtyTracker implements vscode.Disposable {
     }
 
     private async onChange(e: vscode.TextDocumentChangeEvent): Promise<void> {
-        if (e.document.languageId !== 'javascript' || e.contentChanges.length === 0) {
+        if (!isSupportedLanguageId(e.document.languageId) || e.contentChanges.length === 0) {
             return;
         }
         const workspaceRoot = this.getWorkspaceRoot();
@@ -80,7 +81,7 @@ export class DirtyTracker implements vscode.Disposable {
     private onSave(document: vscode.TextDocument): void {
         this.resolvedCache.delete(document.uri.toString());
         const workspaceRoot = this.getWorkspaceRoot();
-        if (!workspaceRoot || document.languageId !== 'javascript') {
+        if (!workspaceRoot || !isSupportedLanguageId(document.languageId)) {
             return;
         }
         this.clearFile(relFileFor(document, workspaceRoot));

@@ -4,7 +4,7 @@ sidecar-side location lookup the docked panel's click-to-navigate now tries
 first, ahead of VS Code's own `executeWorkspaceSymbolProvider`. Added after
 the user reported what looked like a dead navigate link; investigation
 showed the target (`handleRenderRoute`) was a real, correctly-identified
-caller in `fixtures/sample-repo/repomap/handlers.js` -- the sidecar's own
+caller in `fixtures/javascript/repomap/handlers.js` -- the sidecar's own
 repomap already knows exactly where it is, VS Code's built-in symbol search
 just didn't (it only knows about files the JS/TS language service has
 already opened). See session-08 artifact's follow-up conversation.
@@ -12,16 +12,13 @@ already opened). See session-08 artifact's follow-up conversation.
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
 from sidecar.repomap.context import RepoMap
 from sidecar.rpc_server import _handle_resolve_function
+from sidecar.tests.fixture_paths import fixture_repomap_root
 
-FIXTURE_ROOT = os.path.join(
-    os.path.dirname(__file__), "..", "..", "fixtures", "sample-repo", "repomap"
-)
+FIXTURE_ROOT = fixture_repomap_root("javascript")
 
 
 @pytest.fixture(scope="module")

@@ -6,6 +6,7 @@ import { KeyedDebouncer } from './debounce';
 import { resolveFunctionsInFile, ResolvedFunction } from './functionResolution';
 import { generateAndCache } from './generation';
 import { hooksInstalled, installAllHooks, isRealGitRepo, readOptional } from './gitHookInstaller';
+import { hasSupportedExtension } from './languages';
 import { SidecarManager } from './sidecar/sidecarManager';
 import { flagStaleDependents, StaleTracker } from './staleTracking';
 
@@ -158,7 +159,7 @@ export class GitHookReindexManager implements vscode.Disposable {
         const relFiles = content
             .split('\n')
             .map((line) => line.trim())
-            .filter((line) => line.endsWith('.js'));
+            .filter((line) => hasSupportedExtension(line));
         if (relFiles.length === 0) {
             return;
         }

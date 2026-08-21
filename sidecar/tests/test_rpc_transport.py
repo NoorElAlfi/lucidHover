@@ -100,7 +100,7 @@ def _request_posix(sock, payload: dict) -> dict:
 @pytest.fixture
 def tiny_repo(tmp_path):
     """A one-function fixture repo, deliberately smaller than
-    fixtures/sample-repo -- indexing time (which runs before the pipe/socket
+    fixtures/javascript -- indexing time (which runs before the pipe/socket
     is even created, see rpc_server.py's `main()`) is the dominant wait
     before this test can connect at all, so keep it minimal."""
     (tmp_path / "tiny.js").write_text("function add(a, b) {\n    return a + b;\n}\n", encoding="utf-8")

@@ -1,10 +1,13 @@
 """
 Smoke test for Session 3's repomap port, codifying the manual validation run
-against fixtures/sample-repo/repomap (21 functions, 5 files, deliberate
+against fixtures/javascript/repomap (21 functions, 5 files, deliberate
 cross-file call chains -- see .claude/sessions/session-03-repomap-port.md).
 Session 8 adds coverage for `RepoMap.reindex_file` (the debounced-save
 re-indexing entry point) and `find_js_files`'s `.jsx` support (added
 mid-session once a real target repo turned out to have a JSX frontend).
+Session 24 renames `find_js_files` to `find_source_files` (now walking every
+registered language, not just JavaScript, once TypeScript became a second
+one) and updates the extension-inclusion test below accordingly.
 """
 
 import os
@@ -13,11 +16,10 @@ import shutil
 import pytest
 
 from sidecar.repomap.context import RepoMap
-from sidecar.repomap.extraction import find_js_files
+from sidecar.repomap.extraction import find_source_files
+from sidecar.tests.fixture_paths import fixture_repomap_root
 
-FIXTURE_ROOT = os.path.join(
-    os.path.dirname(__file__), "..", "..", "fixtures", "sample-repo", "repomap"
-)
+FIXTURE_ROOT = fixture_repomap_root("javascript")
 
 
 @pytest.fixture(scope="module")
@@ -113,23 +115,26 @@ def test_reindex_file_picks_up_new_call_edge(scratch_repo_map):
     assert "validateEmail" in callee_names
 
 
-def test_find_js_files_includes_jsx_excludes_ts(tmp_path):
+def test_find_source_files_includes_every_registered_language_excludes_unknown(tmp_path):
     """
     `.jsx` uses the same tree-sitter-javascript grammar as `.js` (confirmed
     directly against a real React component before adding this -- see
-    session-08 artifact), so it's included. `.ts`/`.tsx` need a different
-    grammar the sidecar doesn't have -- confirm they're NOT silently
-    (mis)picked up.
+    session-08 artifact), so it's included. `.ts`/`.tsx` are registered as of
+    Session 24 (their own grammars, via the "typescript"/"typescriptreact"
+    manifest entries) and are now included too. `.py` has no registered
+    adapter -- confirm it's still NOT silently (mis)picked up, same as `.ts`
+    was before Session 24 added it.
     """
     (tmp_path / "a.js").write_text("function a() {}", encoding="utf-8")
     (tmp_path / "b.jsx").write_text("function B() { return <div />; }", encoding="utf-8")
     (tmp_path / "c.ts").write_text("function c(): void {}", encoding="utf-8")
     (tmp_path / "d.tsx").write_text("function D(): JSX.Element { return <div />; }", encoding="utf-8")
+    (tmp_path / "e.py").write_text("def e(): pass", encoding="utf-8")
     (tmp_path / "node_modules").mkdir()
-    (tmp_path / "node_modules" / "e.jsx").write_text("function E() {}", encoding="utf-8")
+    (tmp_path / "node_modules" / "f.jsx").write_text("function F() {}", encoding="utf-8")
 
-    found = {os.path.basename(f) for f in find_js_files(str(tmp_path))}
-    assert found == {"a.js", "b.jsx"}
+    found = {os.path.basename(f) for f in find_source_files(str(tmp_path))}
+    assert found == {"a.js", "b.jsx", "c.ts", "d.tsx"}
 
 
 def test_reindex_file_leaves_other_files_call_graph_intact(scratch_repo_map):

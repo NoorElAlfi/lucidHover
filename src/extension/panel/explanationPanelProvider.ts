@@ -4,6 +4,7 @@ import * as vscode from 'vscode';
 import { ExplanationCache, CacheRow } from '../cache/explanationCache';
 import { EMBEDDING_MODEL_ID, PROMPT_VERSION, resolveModelId } from '../cache/config';
 import { resolveEnclosingFunction } from '../functionResolution';
+import { isSupportedLanguageId } from '../languages';
 import { SidecarManager } from '../sidecar/sidecarManager';
 
 export const EXPLANATION_PANEL_VIEW_ID = 'lucidhover.explanationPanel';
@@ -123,7 +124,7 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
     private async refreshFor(editor: vscode.TextEditor | undefined): Promise<void> {
         const workspaceRoot = this.getWorkspaceRoot();
         const cache = this.getCache();
-        if (!this.view || !workspaceRoot || !cache || !editor || editor.document.languageId !== 'javascript') {
+        if (!this.view || !workspaceRoot || !cache || !editor || !isSupportedLanguageId(editor.document.languageId)) {
             this.postEmpty();
             return;
         }

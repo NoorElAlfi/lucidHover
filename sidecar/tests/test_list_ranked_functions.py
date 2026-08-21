@@ -6,16 +6,13 @@ repo's already-computed PageRank importance -- no new ranker.
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
 from sidecar.repomap.context import RepoMap
 from sidecar.rpc_server import _handle_list_ranked_functions
+from sidecar.tests.fixture_paths import fixture_repomap_root
 
-FIXTURE_ROOT = os.path.join(
-    os.path.dirname(__file__), "..", "..", "fixtures", "sample-repo", "repomap"
-)
+FIXTURE_ROOT = fixture_repomap_root("javascript")
 
 
 @pytest.fixture(scope="module")

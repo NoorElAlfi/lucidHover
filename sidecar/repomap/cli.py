@@ -2,7 +2,7 @@
 Manual validation runner for Session 3. Not wired into the sidecar process
 yet (that's Session 4) -- run directly:
 
-    python -m sidecar.repomap.cli fixtures/sample-repo/repomap
+    python -m sidecar.repomap.cli fixtures/javascript/repomap
 """
 
 from __future__ import annotations

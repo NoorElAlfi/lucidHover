@@ -19,5 +19,47 @@
       "definition.method": "function",
       "reference.call": "call"
     }
+  },
+  "typescript": {
+    "displayName": "TypeScript",
+    "vscodeLanguageId": "typescript",
+    "extensions": [".ts"],
+    "treeSitter": {
+      "grammarPackage": "tree_sitter_typescript",
+      "grammarFunction": "language_typescript"
+    },
+    "tagQueryFile": "typescript_tags.scm",
+    "exclusions": {
+      "dirs": ["node_modules", "out", "dist", "build"],
+      "defNames": ["constructor"],
+      "refNames": []
+    },
+    "resolutionStrategy": "tree-sitter-only",
+    "captureKindMap": {
+      "definition.function": "function",
+      "definition.method": "function",
+      "reference.call": "call"
+    }
+  },
+  "typescriptreact": {
+    "displayName": "TypeScript React",
+    "vscodeLanguageId": "typescriptreact",
+    "extensions": [".tsx"],
+    "treeSitter": {
+      "grammarPackage": "tree_sitter_typescript",
+      "grammarFunction": "language_tsx"
+    },
+    "tagQueryFile": "typescript_tags.scm",
+    "exclusions": {
+      "dirs": ["node_modules", "out", "dist", "build"],
+      "defNames": ["constructor"],
+      "refNames": []
+    },
+    "resolutionStrategy": "tree-sitter-only",
+    "captureKindMap": {
+      "definition.function": "function",
+      "definition.method": "function",
+      "reference.call": "call"
+    }
   }
 }

@@ -18,7 +18,26 @@ import { EMBEDDING_MODEL_ID, PROMPT_VERSION, resolveModelId } from '../../cache/
 import { CacheRow, ExplanationCache } from '../../cache/explanationCache';
 import { resolveEnclosingFunction } from '../../functionResolution';
 import { ExplanationHoverProvider } from '../../hover/functionHoverProvider';
+import { supportedLanguages } from '../../languages';
 import { SidecarManager } from '../../sidecar/sidecarManager';
+
+/**
+ * The single top-level fixture file's name, e.g. `sample.js` for the
+ * `javascript` fixture or `sample.ts` for `typescript` (Session 24) --
+ * derived from `LUCIDHOVER_FIXTURE_LANGUAGE` (same env var runTest.ts uses to
+ * pick the workspace root, per session-23) via the language manifest's own
+ * first extension, rather than a second hardcoded literal. Both existing
+ * fixtures deliberately mirror `add`/`greet`'s line numbers and bodies
+ * exactly (see fixtures/typescript/sample.ts's header), so the hardcoded
+ * `Position`s and function names below stay valid across languages -- only
+ * the filename varies.
+ */
+function sampleFileName(): string {
+    const fixtureLanguage = process.env.LUCIDHOVER_FIXTURE_LANGUAGE ?? 'javascript';
+    const entry = supportedLanguages().find((e) => e.vscodeLanguageId === fixtureLanguage);
+    assert.ok(entry, `no languages.json entry for LUCIDHOVER_FIXTURE_LANGUAGE=${fixtureLanguage}`);
+    return `sample${entry!.extensions[0]}`;
+}
 
 suite('hover/ExplanationHoverProvider (Core Rule 4: cache-lookup-only on a hit)', () => {
     let sandbox: sinon.SinonSandbox;
@@ -34,7 +53,7 @@ suite('hover/ExplanationHoverProvider (Core Rule 4: cache-lookup-only on a hit)'
         const folders = vscode.workspace.workspaceFolders;
         assert.ok(folders && folders.length > 0, 'expected the fixture repo to be open as the test workspace');
         workspaceRoot = folders[0].uri.fsPath;
-        document = await vscode.workspace.openTextDocument(path.join(workspaceRoot, 'sample.js'));
+        document = await vscode.workspace.openTextDocument(path.join(workspaceRoot, sampleFileName()));
 
         // The built-in JS language service needs a moment to analyze a
         // freshly-opened document before `vscode.executeDocumentSymbolProvider`
@@ -51,7 +70,7 @@ suite('hover/ExplanationHoverProvider (Core Rule 4: cache-lookup-only on a hit)'
             }
             await new Promise((resolve) => setTimeout(resolve, 250));
         }
-        assert.fail('document symbol provider never returned symbols for sample.js');
+        assert.fail(`document symbol provider never returned symbols for ${sampleFileName()}`);
     });
 
     setup(() => {
@@ -90,7 +109,7 @@ suite('hover/ExplanationHoverProvider (Core Rule 4: cache-lookup-only on a hit)'
     test('cache hit: renders from the cached row without ever calling sidecar.request', async () => {
         const requestSpy = sandbox.stub(sidecar, 'request');
 
-        // `add(a, b)` at sample.js:4 -- resolve it for real (same code path
+        // `add(a, b)`, inside the sample fixture's `add` function -- resolve it for real (same code path
         // production uses) so fn_id/fn_hash/relFile match exactly.
         const position = new vscode.Position(4, 10);
         const resolved = await resolveEnclosingFunction(document, position, workspaceRoot);
