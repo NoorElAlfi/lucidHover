@@ -244,7 +244,7 @@ async function resolveFileSummaryParagraph(
     functions: DocFunctionEntry[],
     output: vscode.OutputChannel
 ): Promise<{ text: string; failed: boolean }> {
-    const fnId = computeFnId(relFile, SYNTHETIC_FILE_SUMMARY_NAME, 0);
+    const fnId = computeFnId(relFile, SYNTHETIC_FILE_SUMMARY_NAME);
     const fnHash = computeFileSummaryFnHash(functions.map((f) => f.resolved.fnHash));
 
     const cached = cache.lookup({

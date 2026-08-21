@@ -114,6 +114,8 @@ detail. Detail lives in the artifact.
 | 15 | Secondary summary-doc generator | complete | [session-15-summary-doc-generator.md](.claude/sessions/session-15-summary-doc-generator.md) |
 | 16 | Sidecar crash-recovery hardening | complete | [session-16-crash-recovery-hardening.md](.claude/sessions/session-16-crash-recovery-hardening.md) |
 | 17 | Full unit + integration test suite, packaging dry-run | complete | [session-17-test-suite-and-packaging.md](.claude/sessions/session-17-test-suite-and-packaging.md) |
+| 18 | fnId cache-identity fix (line-shift stability) — bug fix, not a build-order milestone | complete | [session-18-fnid-cache-identity-fix.md](.claude/sessions/session-18-fnid-cache-identity-fix.md) |
+| 19 | `side_effects` granularity fix (prompt/schema bug fix, not a build-order step) | complete | [session-19-side-effects-granularity-fix.md](.claude/sessions/session-19-side-effects-granularity-fix.md) |
 
 ## File ownership (avoid overlapping edits across parallel work)
 

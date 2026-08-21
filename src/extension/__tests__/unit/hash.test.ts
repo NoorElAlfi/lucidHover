@@ -4,14 +4,26 @@ import { computeCacheKey, computeFileSummaryFnHash, computeFnHash, computeFnId }
 describe('cache/hash', () => {
     describe('computeFnId', () => {
         it('is deterministic for the same inputs', () => {
-            assert.strictEqual(computeFnId('a.js', 'foo', 12), computeFnId('a.js', 'foo', 12));
+            assert.strictEqual(computeFnId('a.js', 'foo'), computeFnId('a.js', 'foo'));
         });
 
-        it('differs when file, name, or line differ', () => {
-            const base = computeFnId('a.js', 'foo', 12);
-            assert.notStrictEqual(computeFnId('b.js', 'foo', 12), base);
-            assert.notStrictEqual(computeFnId('a.js', 'bar', 12), base);
-            assert.notStrictEqual(computeFnId('a.js', 'foo', 13), base);
+        it('differs when file or qualified name differ', () => {
+            const base = computeFnId('a.js', 'foo');
+            assert.notStrictEqual(computeFnId('b.js', 'foo'), base);
+            assert.notStrictEqual(computeFnId('a.js', 'bar'), base);
+        });
+
+        // Session 18 (fnId cache-identity fix): identity is now file +
+        // enclosing-scope-qualified name, not a line number, specifically so
+        // it stays stable when a function shifts lines due to an unrelated
+        // earlier edit -- assert that invariant directly, not just infer it
+        // from the signature no longer taking a line param.
+        it('is line-shift stable: qualified name alone determines identity', () => {
+            assert.strictEqual(computeFnId('a.js', 'Foo.handle'), computeFnId('a.js', 'Foo.handle'));
+        });
+
+        it('distinguishes same-name functions in different enclosing scopes via qualified name', () => {
+            assert.notStrictEqual(computeFnId('a.js', 'Foo.handle'), computeFnId('a.js', 'Bar.handle'));
         });
     });
 
