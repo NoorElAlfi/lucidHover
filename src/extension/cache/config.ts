@@ -81,6 +81,20 @@ export function resolveOllamaEndpoint(): ResolvedOllamaEndpoint {
  */
 export const EMBEDDING_MODEL_ID = 'all-minilm';
 /**
+ * `few-shot-v4` (was `few-shot-v3`): fixed an output-quality inconsistency
+ * where `side_effects` was sometimes returned as several distinct array
+ * elements and sometimes as a single comma-joined string containing all of
+ * them -- both satisfy the JSON schema's "array of strings" shape, so this
+ * was a prompt-adherence gap, not a schema bug. sidecar/generation/prompt.py's
+ * `side_effects` field rule now explicitly forbids comma-joining multiple
+ * effects into one element (with an inline WRONG/RIGHT example), and a
+ * fourth few-shot example (`_EXAMPLE_4`) was added showing a function with
+ * all five side-effect categories at once, each correctly split into its
+ * own array element. Bumped per Core Design Decision #2 ("Any change to
+ * context composition, model, or prompt template must be reflected in this
+ * key"), so old rows generated under the previous prompt don't get served
+ * as if they reflect the new one.
+ *
  * `few-shot-v3` (was `few-shot-v2`): `build_context_bundle()` gained a
  * "Retrieved context" section (Session 11's retrieval tier). Bumped per
  * Core Design Decision #2 ("Any change to context composition... must be
@@ -95,7 +109,7 @@ export const EMBEDDING_MODEL_ID = 'all-minilm';
  * template must be reflected in this key"), so old rows generated under
  * the previous prompt don't get served as if they reflect the new one.
  */
-export const PROMPT_VERSION = 'few-shot-v3';
+export const PROMPT_VERSION = 'few-shot-v4';
 
 /**
  * Session 15 (Build Order step 15, secondary summary-doc generator,
