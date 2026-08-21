@@ -151,6 +151,7 @@ value, not a placeholder to be renamed later.
 | 22 | Extension-host language surface (manifest-driven selectors/guards) | milestone | Core | complete | [session-22-extension-host-language-surface.md](.claude/sessions/session-22-extension-host-language-surface.md) |
 | 23 | Test-harness and fixture parameterisation | milestone | Core | complete | [session-23-fixture-parameterisation.md](.claude/sessions/session-23-fixture-parameterisation.md) |
 | 24 | TypeScript adapter and fixture (second supported language) | milestone | Core | complete | [session-24-typescript-adapter-and-fixture.md](.claude/sessions/session-24-typescript-adapter-and-fixture.md) |
+| 25 | TypeScript validation pass (Tier 2 acceptance, fnId stability, few-shot transfer check) — found and fixed a real `isFunctionLike` bug along the way, so not audit-only | fix | Core | complete | [session-25-typescript-validation-pass.md](.claude/sessions/session-25-typescript-validation-pass.md) |
 
 ## File ownership (avoid overlapping edits across parallel work)
 

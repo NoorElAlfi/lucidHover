@@ -14,12 +14,15 @@ import { computeFnHash, computeFnId } from './cache/hash';
  * The one seam where a document's symbols enter this module (Session 22).
  * Everything below -- qualified-name derivation, fnId assignment,
  * `isFunctionLike` -- consumes only the `vscode.DocumentSymbol[]` this
- * returns and never itself calls a symbol-provider command. Whether this
- * stays `vscode.executeDocumentSymbolProvider` or becomes something else
- * (e.g. an LSP-wrapped adapter, per Core Rule 3) is a decision explicitly
- * deferred to the Python adapter session (session-20 audit, Section 4) --
- * this function is just the single place that decision would land, so it
- * doesn't also become a rewrite of the derivation logic below it.
+ * returns (plus, as of Session 25, the same already-open `TextDocument`'s
+ * text, for `isFunctionLike`'s source-text fallback -- still no second
+ * symbol-provider call) and never itself calls a symbol-provider command.
+ * Whether this stays `vscode.executeDocumentSymbolProvider` or becomes
+ * something else (e.g. an LSP-wrapped adapter, per Core Rule 3) is a
+ * decision explicitly deferred to the Python adapter session (session-20
+ * audit, Section 4) -- this function is just the single place that decision
+ * would land, so it doesn't also become a rewrite of the derivation logic
+ * below it.
  */
 async function getDocumentSymbols(document: vscode.TextDocument): Promise<vscode.DocumentSymbol[]> {
     const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
@@ -29,7 +32,9 @@ async function getDocumentSymbols(document: vscode.TextDocument): Promise<vscode
     return symbols ?? [];
 }
 
-export function isFunctionLike(symbol: vscode.DocumentSymbol): boolean {
+const FUNCTION_VALUE_PATTERN = /=>|\bfunction\b/;
+
+export function isFunctionLike(symbol: vscode.DocumentSymbol, document: vscode.TextDocument): boolean {
     if (
         symbol.kind === vscode.SymbolKind.Function ||
         symbol.kind === vscode.SymbolKind.Method ||
@@ -38,26 +43,54 @@ export function isFunctionLike(symbol: vscode.DocumentSymbol): boolean {
         return true;
     }
     // `const foo = () => {...}` surfaces as SymbolKind.Variable in the built-in
-    // JS language service; its `detail` carries the inferred function type signature.
-    if (symbol.kind === vscode.SymbolKind.Variable && /=>|\bfunction\b/.test(symbol.detail)) {
-        return true;
+    // JS/TS language service, and a class-field arrow property
+    // (`handler = () => {...};`, TypeScript's idiomatic bound-method pattern)
+    // surfaces as SymbolKind.Field or SymbolKind.Property instead -- same
+    // "variable/member bound to a function value" shape, just a different
+    // symbol kind because it's a class member, not a local/module binding.
+    // Confirmed directly (Session 25): without including Field/Property here,
+    // such properties were silently excluded from
+    // `resolveAllFunctions`/`resolveEnclosingFunction` entirely -- never
+    // hovered, never indexed, never cached, with no error anywhere.
+    //
+    // The original version of this check matched against `symbol.detail`
+    // only, on the assumption it carries the inferred function type
+    // signature (true in some VS Code/TS-server versions). Confirmed
+    // directly (Session 25, against the bundled VS Code 1.134.0 test
+    // instance) that `detail` is actually empty for these symbols in this
+    // version -- silently breaking the check for arrow-valued
+    // variables/properties in general, not just the class-field case, e.g.
+    // `fixtures/*/sample.{js,ts}`'s own `double`/`makeCounter` were affected.
+    // Falls back to the symbol's own source text (`document.getText`) when
+    // `detail` is empty, which doesn't depend on that version-specific
+    // behavior. Same regex Aider's own tags query uses for TS's
+    // `public_field_definition` pattern (see typescript_tags.scm), applied
+    // here on the extension-host side of the identical shape.
+    if (
+        symbol.kind === vscode.SymbolKind.Variable ||
+        symbol.kind === vscode.SymbolKind.Field ||
+        symbol.kind === vscode.SymbolKind.Property
+    ) {
+        const signatureSource = symbol.detail || document.getText(symbol.range);
+        return FUNCTION_VALUE_PATTERN.test(signatureSource);
     }
     return false;
 }
 
 export function findEnclosingFunctionSymbol(
     symbols: vscode.DocumentSymbol[],
-    position: vscode.Position
+    position: vscode.Position,
+    document: vscode.TextDocument
 ): vscode.DocumentSymbol | undefined {
     for (const symbol of symbols) {
         if (!symbol.range.contains(position)) {
             continue;
         }
-        const child = findEnclosingFunctionSymbol(symbol.children, position);
+        const child = findEnclosingFunctionSymbol(symbol.children, position, document);
         if (child) {
             return child;
         }
-        if (isFunctionLike(symbol)) {
+        if (isFunctionLike(symbol, document)) {
             return symbol;
         }
     }
@@ -83,15 +116,16 @@ interface FlattenedFunctionSymbol {
  */
 function flattenWithQualifiedNames(
     symbols: vscode.DocumentSymbol[],
+    document: vscode.TextDocument,
     ancestorPath: string[] = []
 ): FlattenedFunctionSymbol[] {
     const result: FlattenedFunctionSymbol[] = [];
     for (const symbol of symbols) {
         const path = [...ancestorPath, symbol.name];
-        if (isFunctionLike(symbol)) {
+        if (isFunctionLike(symbol, document)) {
             result.push({ symbol, qualifiedName: path.join('.') });
         }
-        result.push(...flattenWithQualifiedNames(symbol.children, path));
+        result.push(...flattenWithQualifiedNames(symbol.children, document, path));
     }
     return result;
 }
@@ -165,7 +199,7 @@ export async function resolveEnclosingFunction(
         return undefined;
     }
 
-    const enclosing = findEnclosingFunctionSymbol(symbols, position);
+    const enclosing = findEnclosingFunctionSymbol(symbols, position, document);
     if (!enclosing) {
         return undefined;
     }
@@ -176,7 +210,7 @@ export async function resolveEnclosingFunction(
     // assign it -- otherwise hover and save-reindex could compute different
     // fnIds for the same function.
     const relFile = relFileFor(document, workspaceRoot);
-    const fnIds = assignFnIds(relFile, flattenWithQualifiedNames(symbols));
+    const fnIds = assignFnIds(relFile, flattenWithQualifiedNames(symbols, document));
     const fnId = fnIds.get(enclosing) ?? computeFnId(relFile, enclosing.name);
     return toResolvedFunction(enclosing, fnId, document, relFile);
 }
@@ -196,7 +230,7 @@ export async function resolveAllFunctions(
     }
 
     const relFile = relFileFor(document, workspaceRoot);
-    const flattened = flattenWithQualifiedNames(symbols);
+    const flattened = flattenWithQualifiedNames(symbols, document);
     const fnIds = assignFnIds(relFile, flattened);
     return flattened.map(({ symbol }) =>
         toResolvedFunction(symbol, fnIds.get(symbol) ?? computeFnId(relFile, symbol.name), document, relFile)
