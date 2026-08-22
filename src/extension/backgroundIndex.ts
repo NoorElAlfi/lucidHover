@@ -139,8 +139,29 @@ export class BackgroundIndexManager implements vscode.Disposable {
                 continue;
             }
 
+            // Session 32: defer to any hover-miss/save-reindex/refresh
+            // request that's pending or arrives in the settle window --
+            // once this generate_explanation call is actually sent, nothing
+            // can preempt it (the sidecar dispatches strictly one request at
+            // a time, Core Rule 11), so this is the only point that can
+            // still avoid starting a new collision. See
+            // SidecarManager.waitForInteractiveIdle's doc comment.
+            //
+            // Raced against `token`, not a bare `await` -- a steady stream of
+            // interactive activity (exactly the scenario this session
+            // targets) can otherwise leave `waitForInteractiveIdle()` parked
+            // for an extended, unbounded stretch, during which "Cancel
+            // Background Indexing" would silently have no effect (found by
+            // code-reviewer during this session; same race-against-token
+            // shape as `delay()` below, just against a caller-supplied
+            // promise instead of a fixed timer).
+            await this.raceAgainstCancellation(sidecar.waitForInteractiveIdle(), token);
+            if (token.isCancellationRequested) {
+                break;
+            }
+
             try {
-                await generateAndCache(sidecar, cache, resolved);
+                await generateAndCache(sidecar, cache, resolved, 'background');
                 generated++;
                 this.output.appendLine(`background-index: generated ${resolved.fnId}`);
             } catch (err) {
@@ -208,6 +229,32 @@ export class BackgroundIndexManager implements vscode.Disposable {
                 subscription.dispose();
                 resolve();
             });
+        });
+    }
+
+    /**
+     * Session 32: same "resolve early on cancel" shape as `delay()` above,
+     * for a caller-supplied promise (`sidecar.waitForInteractiveIdle()`)
+     * instead of a fixed timer -- that wait has no cancellation token of its
+     * own to pass through, and can legitimately run for an extended, open-
+     * ended stretch while interactive activity keeps arriving, which
+     * shouldn't leave "Cancel Background Indexing" unresponsive in the
+     * meantime. Doesn't cancel `awaited` itself (it has no cancel handle);
+     * just stops this loop from waiting on it further once `token` fires.
+     */
+    private raceAgainstCancellation(awaited: Promise<void>, token: vscode.CancellationToken): Promise<void> {
+        return new Promise((resolve) => {
+            let settled = false;
+            const finish = () => {
+                if (settled) {
+                    return;
+                }
+                settled = true;
+                subscription.dispose();
+                resolve();
+            };
+            const subscription = token.onCancellationRequested(finish);
+            void awaited.then(finish);
         });
     }
 }

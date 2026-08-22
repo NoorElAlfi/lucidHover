@@ -10,6 +10,16 @@ const HEARTBEAT_INTERVAL_MS = 7_000;
 /** Consecutive heartbeat failures before we conclude the sidecar is gone and restart it. */
 const HEARTBEAT_FAILURE_THRESHOLD = 3;
 const REQUEST_TIMEOUT_MS = 4_000;
+/** Session 32: once no interactive-priority request is pending, a background
+ * loop still waits this long before committing to sending its next request --
+ * a short settle window so an interactive request that's about to be issued
+ * (e.g. VS Code just dispatched a hover a few ms before this check ran) gets
+ * a chance to register as pending before a background call starts. Once a
+ * background request is actually sent, nothing can preempt it (Core Rule 11:
+ * the sidecar dispatches strictly one request at a time), so this window is
+ * the only remaining lever on the client side. See session-32 artifact for
+ * the measurement this value is tuned against. */
+const INTERACTIVE_GRACE_MS = 300;
 /** Total connect-retry budget (attempts x delay) is deliberately generous --
  * `repo_map.index()` (rpc_server.py's `main()`) runs synchronously before the
  * socket/pipe opens, and its cost scales with repo size. The previous budget
@@ -39,9 +49,21 @@ const MAX_RESTART_ATTEMPTS = 5;
 const RESTART_BACKOFF_BASE_MS = 2_000;
 const RESTART_BACKOFF_MAX_MS = 30_000;
 
+/**
+ * Session 32: distinguishes a real-time-sensitive caller (hover cache-miss,
+ * debounced-save reindex, manual refresh, panel navigation -- default,
+ * matches every call site that existed before this session) from an
+ * opportunistic background caller (`BackgroundIndexManager`'s pre-generation
+ * walk) that can and should defer to interactive work. Purely a client-side
+ * scheduling hint -- the sidecar's own dispatch loop knows nothing about it
+ * and stays strictly one-request-at-a-time either way (Core Rule 11).
+ */
+export type RequestPriority = 'interactive' | 'background';
+
 interface PendingRequest {
     resolve: (value: unknown) => void;
     reject: (err: Error) => void;
+    priority: RequestPriority;
 }
 
 interface RpcResponse {
@@ -115,6 +137,10 @@ export class SidecarManager implements vscode.Disposable {
     private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
     private readonly pendingRequests = new Map<number, PendingRequest>();
     private nextId = 1;
+    /** Session 32: resolve callbacks for `waitForInteractiveIdle()` callers
+     * currently parked, woken whenever the interactive-pending count could
+     * have dropped to zero (see `notifyIfIdle`). */
+    private interactiveIdleWaiters: Array<() => void> = [];
     private buffer = '';
     private consecutiveFailures = 0;
     private restarting = false;
@@ -245,8 +271,24 @@ export class SidecarManager implements vscode.Disposable {
         }, HEARTBEAT_INTERVAL_MS);
     }
 
-    /** Sends a JSON-RPC request and waits for its matching response. */
-    request<T = unknown>(method: string, params: unknown, timeoutMs = REQUEST_TIMEOUT_MS): Promise<T> {
+    /**
+     * Sends a JSON-RPC request and waits for its matching response.
+     *
+     * `priority` (Session 32) defaults to `'interactive'`, matching every
+     * call site that existed before this session -- only
+     * `BackgroundIndexManager`'s pre-generation loop passes `'background'`.
+     * It doesn't change how this request is sent or dispatched (the sidecar
+     * is still strictly one-at-a-time, Core Rule 11); it only makes this
+     * request visible to `waitForInteractiveIdle()` while it's pending, so a
+     * background caller can defer its *next* request until interactive work
+     * has drained.
+     */
+    request<T = unknown>(
+        method: string,
+        params: unknown,
+        timeoutMs = REQUEST_TIMEOUT_MS,
+        priority: RequestPriority = 'interactive'
+    ): Promise<T> {
         if (!this.socket || this.socket.destroyed) {
             return Promise.reject(new Error('sidecar is not connected'));
         }
@@ -258,6 +300,7 @@ export class SidecarManager implements vscode.Disposable {
         return new Promise<T>((resolve, reject) => {
             const timer = setTimeout(() => {
                 this.pendingRequests.delete(id);
+                this.notifyIfIdle();
                 reject(new Error(`sidecar request timed out: ${method}`));
             }, timeoutMs);
 
@@ -270,16 +313,83 @@ export class SidecarManager implements vscode.Disposable {
                     clearTimeout(timer);
                     reject(err);
                 },
+                priority,
             });
 
             socket.write(payload, (err) => {
                 if (err) {
                     this.pendingRequests.delete(id);
+                    this.notifyIfIdle();
                     clearTimeout(timer);
                     reject(err);
                 }
             });
         });
+    }
+
+    /**
+     * Resolves once no interactive-priority request is pending, after a
+     * short settle window (see `INTERACTIVE_GRACE_MS`) confirms nothing new
+     * arrived in the meantime. Intended for a background caller to await
+     * immediately before sending each of its own requests -- see
+     * `BackgroundIndexManager`'s pre-generation loop. Local, in-memory
+     * bookkeeping only; never issues an RPC of its own (Core Rule 11's
+     * "don't add a polling loop" is about sidecar traffic, not this).
+     */
+    async waitForInteractiveIdle(): Promise<void> {
+        while (!this.disposed) {
+            while (this.hasInteractivePending() && !this.disposed) {
+                await this.nextIdleSignal();
+            }
+            if (this.disposed) {
+                return;
+            }
+            // A fresh, independent timer -- deliberately not the `sleep()`
+            // helper below, which stores its timer/resolve callback in the
+            // single-slot `restartRetryTimer`/`restartRetrySignal` fields for
+            // `runRecoveryLoop`'s backoff wait. This grace wait and a restart
+            // backoff can legitimately be in flight at the same time (a
+            // crash-triggered restart backing off while background indexing
+            // is separately parked here); sharing that single slot would let
+            // whichever one calls `sleep()` second silently steal the
+            // other's timer out from under `cancelPendingRetry()` (found by
+            // code-reviewer during this session).
+            await new Promise<void>((resolve) => setTimeout(resolve, INTERACTIVE_GRACE_MS));
+            if (!this.hasInteractivePending()) {
+                return;
+            }
+            // Something interactive arrived during the settle window -- loop
+            // around and wait it out too.
+        }
+    }
+
+    private hasInteractivePending(): boolean {
+        for (const pending of this.pendingRequests.values()) {
+            if (pending.priority === 'interactive') {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private nextIdleSignal(): Promise<void> {
+        return new Promise((resolve) => this.interactiveIdleWaiters.push(resolve));
+    }
+
+    /** Call after any removal from `pendingRequests` -- wakes every parked
+     * `waitForInteractiveIdle()` caller if the interactive count has (or
+     * could have) reached zero. Waking on every removal rather than only
+     * interactive ones keeps this simple; a spurious wake just re-checks and
+     * goes back to waiting if something interactive is still pending. */
+    private notifyIfIdle(): void {
+        if (this.hasInteractivePending()) {
+            return;
+        }
+        const waiters = this.interactiveIdleWaiters;
+        this.interactiveIdleWaiters = [];
+        for (const resolve of waiters) {
+            resolve();
+        }
     }
 
     dispose(): void {
@@ -332,6 +442,7 @@ export class SidecarManager implements vscode.Disposable {
             return;
         }
         this.pendingRequests.delete(message.id as number);
+        this.notifyIfIdle();
 
         if (message.error) {
             pending.reject(new Error(message.error.message));
@@ -550,6 +661,7 @@ export class SidecarManager implements vscode.Disposable {
             pending.reject(new Error(`sidecar torn down (${reason})`));
         }
         this.pendingRequests.clear();
+        this.notifyIfIdle();
     }
 
     private log(message: string): void {

@@ -2,7 +2,7 @@ import { ExplanationCache, CacheRow } from './cache/explanationCache';
 import { EMBEDDING_MODEL_ID, PROMPT_VERSION, resolveModelId } from './cache/config';
 import { computeCacheKey } from './cache/hash';
 import { ResolvedFunction } from './functionResolution';
-import { SidecarManager } from './sidecar/sidecarManager';
+import { RequestPriority, SidecarManager } from './sidecar/sidecarManager';
 
 // Real generation is two sequential Ollama calls (sidecar/generation/), which
 // can comfortably exceed the 4s default RPC timeout meant for near-instant
@@ -16,17 +16,24 @@ export type GenerationTarget = ResolvedFunction;
 
 /**
  * Calls the sidecar's `generate_explanation` and writes the resulting row to
- * the cache. Shared by three callers that all need the identical
+ * the cache. Shared by four callers that all need the identical
  * sidecar-call + cache-key + write sequence (Session 8): the hover
- * provider's cache-miss path, debounced-save re-indexing, and the manual
- * refresh command. Previously this lived inline in the hover provider only
+ * provider's cache-miss path, debounced-save re-indexing, the manual
+ * refresh command, and (Session 9) `BackgroundIndexManager`'s pre-generation
+ * walk. Previously this lived inline in the hover provider only
  * (Sessions 5-7); pulled out here rather than let Session 8's two new
  * callers duplicate it.
+ *
+ * `priority` (Session 32) defaults to `'interactive'`, matching every caller
+ * except `BackgroundIndexManager`, which passes `'background'` so its
+ * `generate_explanation` calls are visible to `SidecarManager.
+ * waitForInteractiveIdle()` -- see sidecarManager.ts's `RequestPriority` doc.
  */
 export async function generateAndCache(
     sidecar: SidecarManager,
     cache: ExplanationCache,
-    target: GenerationTarget
+    target: GenerationTarget,
+    priority: RequestPriority = 'interactive'
 ): Promise<CacheRow> {
     // Resolved once per call (not imported as a constant) so a user override
     // via `lucidHover.modelId` (Build Order step 14) takes effect on the very
@@ -47,7 +54,8 @@ export async function generateAndCache(
             fn_source: target.fnSource,
             model_id: modelId,
         },
-        GENERATE_TIMEOUT_MS
+        GENERATE_TIMEOUT_MS,
+        priority
     );
 
     const row: CacheRow = {
