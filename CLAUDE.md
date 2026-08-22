@@ -155,6 +155,7 @@ value, not a placeholder to be renamed later.
 | 26 | Gutter decoration staleness fix (missing `onDidChangeTextDocument` listener) + push-UI refresh audit + sidecar request-contention diagnosis | fix | Core | complete | [session-26-gutter-staleness-fix.md](.claude/sessions/session-26-gutter-staleness-fix.md) |
 | 27 | SaveReindexManager + staleness Tier-1 regression tests (closes session 23's carried-forward zero-coverage gap) | fix | Core | complete | [session-27-save-reindex-staleness-tests.md](.claude/sessions/session-27-save-reindex-staleness-tests.md) |
 | 28 | Acceptance-script quality heuristics (contradiction + boilerplate-triad detectors) + real-repo hallucination measurement on pokerogue | audit | Core | complete | [session-28-acceptance-quality-heuristics.md](.claude/sessions/session-28-acceptance-quality-heuristics.md) |
+| 29 | Real-repo audit: synthetic-fixture gaps closed for sessions 25/26's fixes (real pokerogue class-field arrow occurrence) + real resource-usage measurement (sidecar RSS, cache growth, confirmed request-contention) against pokerogue | audit | Core | complete | [session-29-real-repo-audit.md](.claude/sessions/session-29-real-repo-audit.md) |
 
 ## File ownership (avoid overlapping edits across parallel work)
 
