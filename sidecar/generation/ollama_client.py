@@ -95,12 +95,68 @@ def embed(model: str, text: str, base_url: str = OLLAMA_BASE_URL) -> list[float]
     the embedding runtime rather than add a second local-model runtime
     (sentence-transformers, fastembed, etc.). No `temperature`/`stop`
     options -- embeddings aren't a sampling process.
+
+    Kept alongside `embed_batch` below for the retrieval tier's single-text
+    query-side call (`retrieve.py::query_top_k`, one query vector per hover-
+    triggered retrieval -- no batching opportunity there). Deliberately still
+    uses the older `/api/embeddings` endpoint, not `/api/embed`: session 33
+    confirmed live that `/api/embeddings` raises a real, catchable error
+    ("the input length exceeds the context length") on context-window
+    overflow, which some caller might still want to catch -- `/api/embed`
+    does not (see `embed_batch`'s docstring).
     """
     result = _post("/api/embeddings", {"model": model, "prompt": text}, base_url)
     embedding = result.get("embedding")
     if not isinstance(embedding, list):
         raise OllamaError(f"Ollama returned no embedding for model '{model}': {result!r}")
     return embedding
+
+
+def embed_batch(model: str, texts: list[str], base_url: str = OLLAMA_BASE_URL) -> list[list[float]]:
+    """
+    Embedding vectors for multiple chunks of text in one HTTP round trip, via
+    Ollama's newer `/api/embed` endpoint (`input` accepts a list of strings
+    and returns one embedding per input, in order).
+
+    Added session 33 (indexing/caching efficiency audit): the full-repo and
+    per-file corpus-embedding passes (`retrieve.py::_rows_for`) previously
+    called `embed()` once per chunk, strictly sequentially -- confirmed live
+    against the real running `all-minilm` at ~2.08s/chunk (20 sequential
+    `/api/embeddings` calls, dominated by Ollama's per-request model-load/
+    dispatch overhead, not the actual embedding compute). The same 20 texts
+    embedded as one `/api/embed` call took 2.34s total (~0.12s/chunk) -- a
+    real, measured 17.8x throughput improvement, with no change to what gets
+    embedded, only how many HTTP round trips it costs.
+
+    Correctness caveat, also confirmed live and the reason this is a
+    separate function rather than a drop-in replacement for `embed` in every
+    caller: `/api/embed` does NOT raise on context-window overflow the way
+    `/api/embeddings` does. A single absurdly long input (>>256 tokens) sent
+    through `/api/embed` returns HTTP 200 with a (silently truncated, so
+    semantically incomplete) embedding instead of Ollama's usual
+    `{"error": "the input length exceeds the context length"}`. This means
+    `embed_batch` cannot support the kind of per-item "skip just this one
+    failing item" handling `_rows_for` used to do around single-item
+    `embed()` calls (session 31) -- there is no per-item failure signal to
+    catch. This is judged safe for `_rows_for`'s actual real inputs: every
+    chunk it embeds is already guaranteed by `chunking.py` to be at or under
+    `CHUNK_MAX_CHARS` (500 chars), which session 31 confirmed empirically
+    sits with real margin below the real overflow boundary (759+ chars) --
+    0 of 1243 real post-fix pokerogue chunks overflowed. A genuine overflow
+    reaching this function would now be silently truncated-and-embedded
+    rather than skipped-with-a-chunk-count-decrement; still strictly better
+    than the pre-session-31 failure mode (one bad chunk discarding an entire
+    pass), just less precise than session 31's per-chunk skip. `embed`
+    (single-item) is kept unchanged and still used by `query_top_k`'s
+    one-off query-side call, which has no batching opportunity anyway.
+    """
+    if not texts:
+        return []
+    result = _post("/api/embed", {"model": model, "input": texts}, base_url)
+    embeddings = result.get("embeddings")
+    if not isinstance(embeddings, list) or len(embeddings) != len(texts):
+        raise OllamaError(f"Ollama returned {len(embeddings) if isinstance(embeddings, list) else 'no'} embeddings for {len(texts)} inputs, model '{model}': {result!r}")
+    return embeddings
 
 
 def generate_structured(
