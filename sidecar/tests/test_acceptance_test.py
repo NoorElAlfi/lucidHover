@@ -147,3 +147,82 @@ def test_granular_side_effects_produce_no_note():
     issues, notes = _check_schema(explanation, [], [])
     assert issues == []
     assert notes == []
+
+
+def test_callees_contradiction_is_a_note_not_an_issue():
+    """
+    The recordNamespaced defect from session-25: why_it_exists claims "no
+    callees" in the same sentence calls actually names one (logEvent).
+    """
+    explanation = _explanation(
+        why_it_exists="Logs it using the logEvent function -- does not have any callees.",
+        calls=["logEvent"],
+    )
+    issues, notes = _check_schema(explanation, [], [])
+    assert issues == []
+    assert len(notes) == 1
+    assert "self-contradiction" in notes[0]
+
+
+def test_callers_contradiction_is_a_note_not_an_issue():
+    explanation = _explanation(
+        why_it_exists="A pure utility with no callers.",
+        used_by=["someCaller"],
+    )
+    issues, notes = _check_schema(explanation, [], [])
+    assert issues == []
+    assert len(notes) == 1
+    assert "self-contradiction" in notes[0]
+
+
+def test_contradiction_pattern_needs_a_nonempty_array():
+    """
+    The negation phrase alone isn't a contradiction -- it only becomes one
+    when the corresponding array actually names something. An accurate "no
+    callees" claim next to an empty calls array must not be flagged.
+    """
+    explanation = _explanation(why_it_exists="A pure utility with no callees and no callers.")
+    issues, notes = _check_schema(explanation, [], [])
+    assert issues == []
+    assert notes == []
+
+
+def test_consistent_why_it_exists_produces_no_contradiction_note():
+    explanation = _explanation(
+        why_it_exists="Logs an event via logEvent, called from recordNamespaced's callers.",
+        calls=["logEvent"],
+        used_by=["someCaller"],
+    )
+    issues, notes = _check_schema(explanation, [], [])
+    assert issues == []
+    assert notes == []
+
+
+def test_boilerplate_triad_is_a_note_not_an_issue():
+    """
+    The isEmpty<T>/handleLoginRoute defect from session-25: side_effects is a
+    near-verbatim copy of 3 of prompt.py's own illustrative category phrases,
+    despite the function doing none of them.
+    """
+    explanation = _explanation(
+        side_effects=[
+            "reading or writing a file",
+            "sending a message or notification",
+            "mutating a parameter or global",
+        ]
+    )
+    issues, notes = _check_schema(explanation, [], [])
+    assert issues == []
+    assert len(notes) == 1
+    assert "boilerplate" in notes[0]
+
+
+def test_single_boilerplate_phrase_produces_no_note():
+    """
+    A single matching phrase is weak evidence on its own -- a function could
+    genuinely do exactly one of these things -- so it must not fire alone.
+    """
+    explanation = _explanation(side_effects=["writes a file to disk"])
+    issues, notes = _check_schema(explanation, [], [])
+    assert issues == []
+    assert notes == []
