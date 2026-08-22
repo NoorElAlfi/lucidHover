@@ -217,6 +217,91 @@ def test_boilerplate_triad_is_a_note_not_an_issue():
     assert "boilerplate" in notes[0]
 
 
+def test_risky_caller_behavior_idiom_produces_no_contradiction_note():
+    """
+    Session 30: the confirmed false positive from a real pokerogue run --
+    `push` (post-summon-phase-priority-queue.ts). The flagged text never
+    claims zero callers; "caller" is an adjective modifying "behavior" (a
+    risk-note idiom lifted near-verbatim from prompt.py's own _EXAMPLE_4
+    text), and the negation trigger "no" only fell inside the old 40-char
+    window by coincidence. used_by is non-empty so the check is live -- it
+    must still produce no note after the window was narrowed to 20 chars.
+    """
+    explanation = _explanation(
+        why_it_exists=(
+            "There are no missing checks or risky caller behavior visible here, "
+            "so no risk to flag."
+        ),
+        used_by=["applySingleAbAttrs", "add", "end"],
+        calls=["applySingleAbAttrs"],
+    )
+    issues, notes = _check_schema(explanation, [], [])
+    assert issues == []
+    assert notes == []
+
+
+def test_getPlayerParty_contradiction_still_fires_after_window_narrowing():
+    """
+    Real pokerogue true positive (session 28): a one-line getter with 15 real
+    callers, but why_it_exists claims it has none. Reuses the real
+    why_it_exists text -- must still fire after the session-30 window
+    narrowing (40 -> 20 chars) that removed the push false positive above.
+    """
+    explanation = _explanation(
+        why_it_exists=(
+            "It does not have any callers or callees, so it is a standalone "
+            "utility method that does not interact with the rest of the codebase."
+        ),
+        used_by=[
+            "getPlayerParty", "getPlayerField", "getPokemonById", "getPokemon",
+            "getParty", "generateModifierType", "reset", "updateModifiers",
+            "select", "catch", "getEligibleMoves", "selectPokemonForOption",
+            "pokemonAndMoveChosen", "callback", "switchOutLogic",
+        ],
+        calls=[],
+    )
+    issues, notes = _check_schema(explanation, [], [])
+    assert issues == []
+    assert len(notes) == 1
+    assert "self-contradiction" in notes[0]
+
+
+def test_getEnemyParty_contradiction_still_fires_after_window_narrowing():
+    """Same shape as getPlayerParty (session 28): identical self-contradiction pattern."""
+    explanation = _explanation(
+        why_it_exists=(
+            "It does not have any callers or callees, so it is a standalone "
+            "utility method that does not interact with the rest of the codebase."
+        ),
+        used_by=["someCaller1", "someCaller2"],
+        calls=[],
+    )
+    issues, notes = _check_schema(explanation, [], [])
+    assert issues == []
+    assert len(notes) == 1
+    assert "self-contradiction" in notes[0]
+
+
+def test_priority_queue_push_contradiction_still_fires_after_window_narrowing():
+    """
+    Real pokerogue true positive (session 28): `push` in priority-queue.ts --
+    why_it_exists claims no known callers/callees despite naming callers one
+    sentence earlier and used_by/calls both being non-empty.
+    """
+    explanation = _explanation(
+        why_it_exists=(
+            "The function does not have any known callers or callees, so its "
+            "role in the codebase cannot be determined here."
+        ),
+        used_by=["applySingleAbAttrs", "add", "end"],
+        calls=["applySingleAbAttrs"],
+    )
+    issues, notes = _check_schema(explanation, [], [])
+    assert issues == []
+    assert len(notes) == 1
+    assert "self-contradiction" in notes[0]
+
+
 def test_single_boilerplate_phrase_produces_no_note():
     """
     A single matching phrase is weak evidence on its own -- a function could
