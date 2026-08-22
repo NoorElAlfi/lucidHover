@@ -72,9 +72,25 @@ _WEAK_PLACEHOLDER_PATTERNS = ["unknown"]
 # "call"/"callee(s)" or "caller(s)" is a self-contradiction only when the
 # corresponding array is actually non-empty -- conservative and regex-based,
 # same "note not issue" treatment as every other heuristic in this file.
+#
+# Session 30: the original 40-char window produced a confirmed false positive
+# against real pokerogue output -- `push` (post-summon-phase-priority-queue.ts)
+# was flagged for "There are no missing checks or risky caller behavior
+# visible here, so no risk to flag", a risk-note idiom lifted from prompt.py's
+# own _EXAMPLE_4 text, not a claim about the function's caller count. There
+# "caller" is an adjective modifying "behavior" (a compound noun), four words
+# and 24 chars away from the negation trigger "no". Every confirmed true
+# positive (the session-28 pokerogue getPlayerParty/getEnemyParty/push
+# examples, plus the pre-existing bare "no callers"/"does not have any
+# callees" unit-test cases) has its negation trigger within 16 chars of the
+# caller/callee word -- narrowing the window to 20 keeps all of those while
+# excluding the 24-char false positive. This is still distance-based, not a
+# real grammatical-subject check, so a short adjectival phrase closer than 20
+# chars to a trigger could in principle still slip through -- accepted
+# tradeoff for a notes-only, human-reviewed heuristic.
 _NEGATION_TRIGGER = r"(?:\bno\b|\bnot\b|\bnone\b|\bnever\b|\bwithout\b|\bdoesn'?t\b|\bdoes\s+not\b|\bdon'?t\b|\bdo\s+not\b)"
-_CALLEES_NEGATION_PATTERN = re.compile(_NEGATION_TRIGGER + r"[^.]{0,40}\bcall(?:s|ees?|ing)?\b", re.IGNORECASE)
-_CALLERS_NEGATION_PATTERN = re.compile(_NEGATION_TRIGGER + r"[^.]{0,40}\bcallers?\b", re.IGNORECASE)
+_CALLEES_NEGATION_PATTERN = re.compile(_NEGATION_TRIGGER + r"[^.]{0,20}\bcall(?:s|ees?|ing)?\b", re.IGNORECASE)
+_CALLERS_NEGATION_PATTERN = re.compile(_NEGATION_TRIGGER + r"[^.]{0,20}\bcallers?\b", re.IGNORECASE)
 
 # Session 28: the verbatim-boilerplate hallucination from session-25
 # (`isEmpty<T>`, `handleLoginRoute`) -- the model copies prompt.py's own
