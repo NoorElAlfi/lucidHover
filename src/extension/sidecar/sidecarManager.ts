@@ -665,6 +665,15 @@ export class SidecarManager implements vscode.Disposable {
     }
 
     private log(message: string): void {
+        // Guard against a late child-process stdout/stderr 'data' event
+        // firing after dispose() has already torn everything down --
+        // teardown() kills the child but doesn't await its exit, and
+        // doesn't remove the process's own stdout/stderr listeners (only
+        // the socket's), so a straggler can still call in here with the
+        // output channel already disposed (found session 27).
+        if (this.disposed) {
+            return;
+        }
         this.output.appendLine(message);
     }
 }
