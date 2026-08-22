@@ -10,7 +10,26 @@ const HEARTBEAT_INTERVAL_MS = 7_000;
 /** Consecutive heartbeat failures before we conclude the sidecar is gone and restart it. */
 const HEARTBEAT_FAILURE_THRESHOLD = 3;
 const REQUEST_TIMEOUT_MS = 4_000;
-const CONNECT_RETRY_ATTEMPTS = 20;
+/** Total connect-retry budget (attempts x delay) is deliberately generous --
+ * `repo_map.index()` (rpc_server.py's `main()`) runs synchronously before the
+ * socket/pipe opens, and its cost scales with repo size. The previous budget
+ * (20 x 250ms = 5s) was calibrated for the small fixture repos (sub-second
+ * indexing) and was never re-checked against a real repo -- confirmed
+ * directly against a 615-file real-world TypeScript repo that indexing alone
+ * takes ~5.5s, i.e. it silently exceeded the old budget, causing every
+ * restart attempt to fail identically (the sidecar was never actually
+ * crashing -- it just hadn't finished indexing before the extension gave up
+ * waiting for the socket) until `runRecoveryLoop` gave up after
+ * `MAX_RESTART_ATTEMPTS`. 120 x 250ms = 30s gives real headroom for
+ * repos meaningfully larger than that one without changing the retry
+ * cadence itself. This is the same class of startup-budget bug
+ * `_embed_repo_in_background`'s own doc comment (rpc_server.py) already
+ * describes hitting once before, for the embedding pass -- backgrounding
+ * `repo_map.index()` the same way would remove the ceiling entirely, but
+ * needs a "not indexed yet" degraded-RPC-response protocol that doesn't
+ * exist today; raising this budget is the minimal fix for the problem as
+ * actually measured. */
+const CONNECT_RETRY_ATTEMPTS = 120;
 const CONNECT_RETRY_DELAY_MS = 250;
 /** Consecutive failed (re)start attempts before the recovery loop gives up and
  * waits for a manual "Restart Sidecar" instead of retrying forever (Build
@@ -39,7 +58,12 @@ function computeAddress(): string {
     return path.join(os.tmpdir(), `${id}.sock`);
 }
 
-function connectWithRetry(address: string, connectFn: typeof net.connect): Promise<net.Socket> {
+function connectWithRetry(
+    address: string,
+    connectFn: typeof net.connect,
+    attempts: number,
+    delayMs: number
+): Promise<net.Socket> {
     return new Promise((resolve, reject) => {
         let attempt = 0;
 
@@ -50,10 +74,10 @@ function connectWithRetry(address: string, connectFn: typeof net.connect): Promi
             const onError = (err: Error) => {
                 socket.removeAllListeners();
                 socket.destroy();
-                if (attempt >= CONNECT_RETRY_ATTEMPTS) {
+                if (attempt >= attempts) {
                     reject(err);
                 } else {
-                    setTimeout(tryConnect, CONNECT_RETRY_DELAY_MS);
+                    setTimeout(tryConnect, delayMs);
                 }
             };
 
@@ -124,6 +148,16 @@ export class SidecarManager implements vscode.Disposable {
     // `sidecarManager.test.ts` pass plain stub functions straight in.
     private readonly spawnFn: typeof cp.spawn;
     private readonly connectFn: typeof net.connect;
+    // Same injection precedent as spawnFn/connectFn above, for the same
+    // reason: sidecarManager.test.ts drives the "gives up after
+    // MAX_RESTART_ATTEMPTS" path with a stub that fails every connect
+    // attempt, so this budget's *real* wall-clock cost (attempts x delayMs,
+    // per restart attempt) is entirely test runtime with no production
+    // value -- at the real default (120 x 250ms = 30s, see CONNECT_RETRY_ATTEMPTS's
+    // doc comment) that test would take minutes. Defaults preserve production
+    // behavior; only the test passes small values.
+    private readonly connectRetryAttempts: number;
+    private readonly connectRetryDelayMs: number;
 
     constructor(
         workspaceRoot: string,
@@ -133,7 +167,9 @@ export class SidecarManager implements vscode.Disposable {
         ollamaBaseUrl: string,
         output: vscode.OutputChannel,
         spawnFn: typeof cp.spawn = cp.spawn,
-        connectFn: typeof net.connect = net.connect
+        connectFn: typeof net.connect = net.connect,
+        connectRetryAttempts: number = CONNECT_RETRY_ATTEMPTS,
+        connectRetryDelayMs: number = CONNECT_RETRY_DELAY_MS
     ) {
         this.workspaceRoot = workspaceRoot;
         this.extensionRoot = extensionRoot;
@@ -143,6 +179,8 @@ export class SidecarManager implements vscode.Disposable {
         this.output = output;
         this.spawnFn = spawnFn;
         this.connectFn = connectFn;
+        this.connectRetryAttempts = connectRetryAttempts;
+        this.connectRetryDelayMs = connectRetryDelayMs;
 
         // Hidden until the recovery loop actually needs to say something
         // (Build Order step 16, design question 2) -- a healthy sidecar never
@@ -196,7 +234,7 @@ export class SidecarManager implements vscode.Disposable {
             void this.restart('sidecar process exited unexpectedly');
         });
 
-        const socket = await connectWithRetry(address, this.connectFn);
+        const socket = await connectWithRetry(address, this.connectFn, this.connectRetryAttempts, this.connectRetryDelayMs);
         this.socket = socket;
         this.buffer = '';
         socket.on('data', (chunk: Buffer) => this.onData(chunk));

@@ -28,6 +28,16 @@ import * as vscode from 'vscode';
 import { SidecarManager } from '../../sidecar/sidecarManager';
 import { createFakeChildProcess, FakeChildProcess, stubConnectAlwaysFails, stubConnectAlwaysSucceeds } from './fakes';
 
+// Real connect-retry defaults (120 attempts x 250ms, see sidecarManager.ts's
+// CONNECT_RETRY_ATTEMPTS doc comment) are calibrated for real repo-indexing
+// startup time, not test speed -- every test here stubs `connectFn` (no real
+// socket/pipe involved), so there is no production behavior to preserve by
+// waiting through that budget in real time. A small, deterministic budget
+// keeps every test's connect-retry loop (when it runs at all) effectively
+// instantaneous regardless of how large the real default grows in the future.
+const TEST_CONNECT_RETRY_ATTEMPTS = 3;
+const TEST_CONNECT_RETRY_DELAY_MS = 1;
+
 function makeManager(
     output: vscode.OutputChannel,
     spawnFn: sinon.SinonStub,
@@ -41,7 +51,9 @@ function makeManager(
         'http://localhost:11434',
         output,
         spawnFn as unknown as typeof cp.spawn,
-        connectFn as unknown as typeof net.connect
+        connectFn as unknown as typeof net.connect,
+        TEST_CONNECT_RETRY_ATTEMPTS,
+        TEST_CONNECT_RETRY_DELAY_MS
     );
 }
 
