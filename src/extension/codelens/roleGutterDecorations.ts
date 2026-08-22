@@ -1,11 +1,20 @@
 import * as vscode from 'vscode';
 import { ExplanationCache } from '../cache/explanationCache';
 import { EMBEDDING_MODEL_ID, PROMPT_VERSION, resolveModelId } from '../cache/config';
+import { KeyedDebouncer } from '../debounce';
 import { resolveAllFunctions } from '../functionResolution';
 import { isSupportedLanguageId } from '../languages';
 import { ALL_ROLE_CATEGORIES, categoryIconFile, classifyRoleTag, PENDING_ICON_FILE, RoleCategory } from './roleCategory';
 
 type DecorationKey = RoleCategory | 'pending';
+
+// Local, in-memory re-render only (resolveAllFunctions + cache lookups, no
+// sidecar RPC) -- much cheaper than SaveReindexManager's 750ms debounce
+// (saveReindex.ts), which gates a real generate_explanation call. Still
+// debounced, not fired on every keystroke, so a burst of edits collapses to
+// one re-render per document per window (same collapsing behavior
+// DirtyTracker's own onDidChangeTextDocument listener relies on).
+const CHANGE_REFRESH_DEBOUNCE_MS = 300;
 
 /**
  * Gutter icon per role category (Build Order step 10, `TextEditorDecorationType.
@@ -18,11 +27,23 @@ type DecorationKey = RoleCategory | 'pending';
  * `DecorationProvider` analog to `CodeLensProvider`'s pull-on-demand model),
  * so this class owns redrawing every visible editor itself, on the same
  * triggers CodeLens redraws from (visibility changes, and Session 10's new
- * `ExplanationCache.onDidWrite` notification).
+ * `ExplanationCache.onDidWrite` notification) plus a debounced
+ * `onDidChangeTextDocument` listener (Session 26 fix, below): a decoration
+ * set once by `refreshEditor` only ever auto-adjusts its *position* as VS
+ * Code's own range-tracking follows edits -- it never gets recomputed
+ * against the current source on a bare text edit the way `CodeLensProvider`
+ * does (VS Code re-invokes `provideCodeLenses` itself on document changes).
+ * Without this listener a deleted function's dot stays parked at its last
+ * tracked position forever, and any transient bad resolution picked up by
+ * an unrelated `refreshAll()` trigger mid-edit (e.g. a cache write for a
+ * different file landing while this document is mid-keystroke) never
+ * self-corrects either -- both are the same root cause, a missing
+ * re-render trigger on edit.
  */
 export class RoleGutterDecorationManager implements vscode.Disposable {
     private readonly decorationTypes: Map<DecorationKey, vscode.TextEditorDecorationType>;
     private readonly subscriptions: vscode.Disposable[] = [];
+    private readonly changeDebouncer = new KeyedDebouncer<string>(CHANGE_REFRESH_DEBOUNCE_MS);
 
     constructor(
         extensionUri: vscode.Uri,
@@ -54,8 +75,24 @@ export class RoleGutterDecorationManager implements vscode.Disposable {
                 if (editor) {
                     void this.refreshEditor(editor);
                 }
-            })
+            }),
+            vscode.workspace.onDidChangeTextDocument((e) => this.onDocumentChanged(e))
         );
+    }
+
+    /** Debounced per-document re-render on a bare text edit (Session 26 fix -- see class doc comment). */
+    private onDocumentChanged(e: vscode.TextDocumentChangeEvent): void {
+        if (!isSupportedLanguageId(e.document.languageId) || e.contentChanges.length === 0) {
+            return;
+        }
+        const uriKey = e.document.uri.toString();
+        this.changeDebouncer.schedule(uriKey, () => {
+            for (const editor of vscode.window.visibleTextEditors) {
+                if (editor.document.uri.toString() === uriKey) {
+                    void this.refreshEditor(editor);
+                }
+            }
+        });
     }
 
     /** Redraws every currently visible editor. Called on startup/trust-grant and on every cache write (design question 3). */
@@ -126,6 +163,7 @@ export class RoleGutterDecorationManager implements vscode.Disposable {
     }
 
     dispose(): void {
+        this.changeDebouncer.dispose();
         for (const subscription of this.subscriptions) {
             subscription.dispose();
         }
