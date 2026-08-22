@@ -21,6 +21,20 @@ import { documentSelectorForSupportedLanguages } from '../../languages';
  * regardless of whether VS Code's own invalidation exists) and drives it
  * through `vscode.executeCodeLensProvider`, the same command
  * languageGating.test.ts already uses to exercise the real dispatch layer.
+ *
+ * Session 34 fix: `vscode.executeCodeLensProvider` aggregates lenses from
+ * *every* registered provider matching the document's language, not just
+ * this suite's own instance. The real extension is active in this same
+ * Extension Development Host (the test workspace is `fixtures/javascript`,
+ * opened trusted -- see `runTest.ts`) and registers its own
+ * `RoleCodeLensProvider` globally by language, with no path/workspace
+ * scoping -- so once its own background indexing finishes, it *also*
+ * matches this suite's temp-dir document and contributes its own lens per
+ * resolved function. That real contribution is stable for the lifetime of
+ * this test (indexing completes once, well before this suite runs, and
+ * never regenerates for this unrelated fnId), so assertions here are
+ * written relative to whatever baseline the real provider contributes,
+ * never as fixed absolute totals.
  */
 suite('codelens/RoleCodeLensProvider: VS Code auto-refreshes lenses on text edit, no manual refresh() (Session 26)', () => {
     let output: vscode.OutputChannel;
@@ -78,7 +92,10 @@ suite('codelens/RoleCodeLensProvider: VS Code auto-refreshes lenses on text edit
             'vscode.executeCodeLensProvider',
             document.uri
         );
-        assert.strictEqual(before_lenses.length, 1, 'expected exactly one lens for alpha() before the edit');
+        // Not asserted as a fixed absolute count -- see the Session 34 class
+        // doc comment: the real extension's own globally-registered
+        // provider may also be contributing a lens for alpha() here.
+        assert.ok(before_lenses.length >= 1, 'expected at least one lens for alpha() before the edit');
 
         const fullRange = new vscode.Range(document.positionAt(0), document.positionAt(document.getText().length));
         const edit = new vscode.WorkspaceEdit();
@@ -87,23 +104,35 @@ suite('codelens/RoleCodeLensProvider: VS Code auto-refreshes lenses on text edit
         assert.ok(applied, 'expected the edit adding beta() to apply');
         await waitForSymbols(2);
 
+        // Also confirm the cache-lookup path actually distinguishes the two
+        // (both "pending" here since nothing was cached), and get beta's
+        // resolved line for the content-based check below.
+        const resolved = await resolveAllFunctions(document, tempDir);
+        assert.strictEqual(resolved.map((r) => r.name).sort().join(','), 'alpha,beta');
+        const betaLine = resolved.find((r) => r.name === 'beta')!.range.start.line;
+        assert.ok(
+            !before_lenses.some((l) => l.range.start.line === betaLine),
+            "precondition: no lens should exist on beta's line before the edit"
+        );
+
         // Deliberately never call provider.refresh() -- the point of this
         // test is that VS Code's own CodeLens feature re-fetches on its own.
         const afterLenses = await vscode.commands.executeCommand<vscode.CodeLens[]>(
             'vscode.executeCodeLensProvider',
             document.uri
         );
-        assert.strictEqual(
-            afterLenses.length,
-            2,
+        // Content-based, not a fixed count or delta on the raw total -- see
+        // the Session 34 class doc comment. The real extension's own
+        // globally-registered provider detects beta() independently of this
+        // suite's own provider, so the total can grow by more than one lens
+        // (one per active provider) -- what matters is that a lens now
+        // exists on beta's line where none did before, proving VS Code
+        // re-fetched from the registered provider(s) without any explicit
+        // refresh() call.
+        assert.ok(
+            afterLenses.some((l) => l.range.start.line === betaLine),
             'expected vscode.executeCodeLensProvider to reflect the newly-added beta() function without any explicit refresh() call'
         );
-
-        // Sanity: also confirm the cache-lookup path actually distinguishes
-        // the two (both "pending" here since nothing was cached), not just
-        // that the count happened to change for an unrelated reason.
-        const resolved = await resolveAllFunctions(document, tempDir);
-        assert.strictEqual(resolved.map((r) => r.name).sort().join(','), 'alpha,beta');
     });
 
     test('regenerating a cached function is reflected without a manual refresh(), matching the live count', async () => {
@@ -131,8 +160,17 @@ suite('codelens/RoleCodeLensProvider: VS Code auto-refreshes lenses on text edit
             'vscode.executeCodeLensProvider',
             document.uri
         );
-        const alphaLens = lenses.find((l) => l.range.start.line === alpha.range.start.line);
-        assert.ok(alphaLens, 'expected a lens on alpha\'s line');
-        assert.match((alphaLens!.command?.title ?? ''), /utility/i);
+        // Filtered by line, then checked with .some() rather than .find() +
+        // a single assertion -- the real extension's own globally-registered
+        // provider (see the Session 34 class doc comment) may also produce a
+        // lens on this exact line (its own cache has no row for this fnId,
+        // so it would show the neutral "pending" title, not "utility").
+        // .find() would flakily grab whichever of the two came first.
+        const lensesOnAlphaLine = lenses.filter((l) => l.range.start.line === alpha.range.start.line);
+        assert.ok(lensesOnAlphaLine.length > 0, "expected at least one lens on alpha's line");
+        assert.ok(
+            lensesOnAlphaLine.some((l) => /utility/i.test(l.command?.title ?? '')),
+            'expected one of the lenses on alpha\'s line to reflect the newly-cached "utility" role'
+        );
     });
 });

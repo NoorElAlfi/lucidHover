@@ -44,6 +44,15 @@ export class RoleGutterDecorationManager implements vscode.Disposable {
     private readonly decorationTypes: Map<DecorationKey, vscode.TextEditorDecorationType>;
     private readonly subscriptions: vscode.Disposable[] = [];
     private readonly changeDebouncer = new KeyedDebouncer<string>(CHANGE_REFRESH_DEBOUNCE_MS);
+    // Per-editor version counter (Session 34 fix): refreshEditor has an
+    // await point (resolveAllFunctions), so two overlapping passes for the
+    // same editor -- e.g. an edit-triggered debounced pass racing a
+    // cache-write-triggered refreshAll() pass -- can otherwise interleave
+    // and let a stale pass's setDecorations() call win over a newer one's
+    // (flagged session 26, reflagged session 27). Each call claims the next
+    // version for its editor before awaiting, and drops its own
+    // setDecorations() call if a later call has since claimed a newer one.
+    private readonly refreshVersions = new WeakMap<vscode.TextEditor, number>();
 
     constructor(
         extensionUri: vscode.Uri,
@@ -107,6 +116,9 @@ export class RoleGutterDecorationManager implements vscode.Disposable {
             return;
         }
 
+        const version = (this.refreshVersions.get(editor) ?? 0) + 1;
+        this.refreshVersions.set(editor, version);
+
         const workspaceRoot = this.getWorkspaceRoot();
         const cache = this.getCache();
         if (!workspaceRoot || !cache) {
@@ -124,6 +136,13 @@ export class RoleGutterDecorationManager implements vscode.Disposable {
             functions = await resolveAllFunctions(editor.document, workspaceRoot);
         } catch (err) {
             this.output.appendLine(`gutter: failed to resolve functions in ${editor.document.uri.fsPath}: ${String(err)}`);
+            return;
+        }
+
+        if (this.refreshVersions.get(editor) !== version) {
+            // A newer refreshEditor() call for this same editor started
+            // (and will finish) after this one -- drop this stale pass
+            // rather than let it clobber the newer pass's result.
             return;
         }
 

@@ -214,7 +214,10 @@ sidecar/
   cache/hashing.py              - sidecar-side context-hash helper
   tests/                        - pytest suite (79 tests as of session 19)
 
-fixtures/sample-repo/           - small fixture repo used by tests and manual verification
+fixtures/
+  REQUIREMENTS.md               - structural requirements every language's fixture dir must satisfy
+  javascript/                   - default fixture (sample.js, repomap/, docs/) -- sessions 1-19's original fixture
+  typescript/                   - second-language fixture (sample.ts, repomap/) -- Session 24
 scripts/acceptance_test.py      - the v0 Definition of Done acceptance check, scriptable
 ```
 
