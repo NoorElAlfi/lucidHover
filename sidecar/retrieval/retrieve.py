@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..generation.ollama_client import OLLAMA_BASE_URL, OllamaError, embed
+from ..generation.ollama_client import OLLAMA_BASE_URL, OllamaError, embed, embed_batch
 from .chunking import CHUNK_MAX_CHARS, Chunk, chunk_file, chunk_repo
 from .vectorstore import VectorStore
 
@@ -26,16 +26,18 @@ TOP_K = 5
 # neighbor results (a function is maximally similar to itself).
 OVERFETCH = TOP_K + 15
 
-# The exact phrase Ollama's `/api/embeddings` reports for a context-window
-# overflow (confirmed live, session 31) -- the one embed() failure mode
-# `_rows_for` below treats as content-specific (skip just that chunk) rather
-# than systemic (re-raise). Deliberately narrow: `ollama_client._post` wraps
-# *every* non-2xx HTTP response as the same `OllamaError` class, including
-# "model not found" (a misconfigured `embedding_model_id`) -- which is just
-# as systemic as an unreachable Ollama (every chunk would fail identically)
-# and must still surface its "Run: ollama pull <model>" diagnostic rather
-# than being silently swallowed chunk-by-chunk.
-_CONTEXT_LENGTH_OVERFLOW_SIGNATURE = "exceeds the context length"
+# Chunks per `embed_batch()` call in `_rows_for` (session 33). Chosen from a
+# real live sweep against the running `all-minilm`: 8-wide batches ran
+# ~260ms/chunk, 32-wide ~73ms/chunk, 64-wide ~38ms/chunk (stable across 3
+# repeated trials), 128-wide ~21ms/chunk, 256-wide ~12ms/chunk -- diminishing
+# returns past ~64, and batches of 400-512 hit real, observed intermittent
+# failures from Ollama's own internal runner subprocess (a `dial tcp ...
+# connectex: actively refused` error talking to its own tokenize helper, not
+# a documented size limit) during the same sweep. 64 sits comfortably below
+# that observed instability while already capturing most of the win (~38ms
+# vs. ~2.08s/chunk sequential -- see `embed_batch`'s docstring) and keeps a
+# single failed batch's blast radius small relative to a full-repo pass.
+EMBED_BATCH_SIZE = 64
 
 
 @dataclass(frozen=True)
@@ -48,51 +50,49 @@ class RetrievedChunk:
 
 def _rows_for(chunks: list[Chunk], embed_model: str, base_url: str) -> list[dict]:
     """
-    Embeds each chunk, skipping (not aborting on) any single chunk whose
-    `embed()` call fails.
+    Embeds every chunk in `EMBED_BATCH_SIZE`-wide groups via `embed_batch()`
+    (session 33 -- see that function's docstring for the real measured
+    throughput win: ~38ms/chunk batched vs. ~2.08s/chunk from the old
+    strictly-sequential `embed()`-per-chunk loop this replaced).
 
-    Session 31: this used to be a plain list comprehension, so one failing
-    chunk anywhere in a full-repo or per-file pass raised immediately and
-    the whole batch's rows were discarded -- `store.replace_all()` /
-    `replace_file()` below never even ran, silently losing every OTHER
-    chunk in that same pass too, not just the one that actually failed.
-    Even with the char-capped chunker in chunking.py making overflow rare,
-    a single chunk can still fail for other reasons (unusual content the
-    char heuristic doesn't anticipate); the retrieval tier's whole design
-    intent is that a chunk-level failure degrades gracefully, not that it
-    takes an entire repo's or file's worth of otherwise-good chunks down
-    with it.
+    Session 31's per-chunk skip-on-overflow behavior (only a genuine
+    context-window-overflow `OllamaError` was swallowed; every other
+    failure -- Ollama unreachable, model not pulled -- re-raised
+    immediately) is NOT preserved here, because it cannot be: session 33
+    confirmed live that `/api/embed` (unlike the single-item `/api/embeddings`
+    `embed()` used) does not raise on overflow at all -- it silently returns
+    a truncated embedding with HTTP 200. There is no longer a per-item
+    failure signal to catch. This is judged safe because every chunk reaching
+    this function is already guaranteed by `chunking.py` to be at or under
+    `CHUNK_MAX_CHARS`, which session 31 confirmed sits with real margin below
+    the real overflow boundary (0 of 1243 real post-fix pokerogue chunks
+    overflowed) -- the skip path this replaces was already unreachable for
+    any chunk `chunking.py` actually produces.
 
-    Only a genuine context-window-overflow failure (Ollama's own reported
-    error contains `_CONTEXT_LENGTH_OVERFLOW_SIGNATURE`) is skipped
-    per-chunk. Every other `OllamaError` -- Ollama unreachable at all, the
-    embedding model not pulled, any other server error -- re-raises
-    immediately: those are systemic (every remaining chunk would fail
-    identically), and swallowing them chunk-by-chunk would silently report
-    "embedded 0 chunks" instead of the actionable diagnostic
-    `ollama_client.py` was built to surface (e.g. "Run: ollama pull
-    <model>"). A broader `isinstance(exc.__cause__, HTTPError)` check was
-    tried first and rejected: `ollama_client._post` wraps *every* non-2xx
-    HTTP response the same way, including "model not found", which is just
-    as systemic as an unreachable Ollama and must not be swallowed either.
+    A batch-level `OllamaError` (connectivity, model not found, or any other
+    non-2xx response) still re-raises immediately and aborts the whole
+    `_rows_for` call, same as a systemic failure always has: every chunk in
+    every remaining batch would fail identically, so failing loud and fast
+    (surfacing e.g. "Run: ollama pull <model>") is still correct. This does
+    mean one failed batch now discards that batch's own (up to
+    `EMBED_BATCH_SIZE`) chunks together rather than one at a time -- accepted
+    given only systemic failures can trigger it at all now, and
+    `EMBED_BATCH_SIZE` was chosen partly to keep that blast radius small.
     """
     rows = []
-    for c in chunks:
-        try:
-            vector = embed(embed_model, c.text, base_url)
-        except OllamaError as exc:
-            if _CONTEXT_LENGTH_OVERFLOW_SIGNATURE in str(exc):
-                continue
-            raise
-        rows.append(
-            {
-                "rel_fname": c.rel_fname,
-                "start_line": c.start_line,
-                "end_line": c.end_line,
-                "text": c.text,
-                "vector": vector,
-            }
-        )
+    for i in range(0, len(chunks), EMBED_BATCH_SIZE):
+        batch = chunks[i : i + EMBED_BATCH_SIZE]
+        vectors = embed_batch(embed_model, [c.text for c in batch], base_url)
+        for c, vector in zip(batch, vectors):
+            rows.append(
+                {
+                    "rel_fname": c.rel_fname,
+                    "start_line": c.start_line,
+                    "end_line": c.end_line,
+                    "text": c.text,
+                    "vector": vector,
+                }
+            )
     return rows
 
 

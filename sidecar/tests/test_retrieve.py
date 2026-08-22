@@ -6,12 +6,23 @@ appear in its own retrieved-context section. `embed()` is monkeypatched
 throughout -- no live Ollama involved, only LanceDB (a plain embedded
 library) and pure Python.
 
-Session 31 adds coverage for `_rows_for`'s per-chunk failure handling: only
-a genuine context-window-overflow error skips just that one chunk; every
+Session 31 added coverage for `_rows_for`'s per-chunk failure handling: only
+a genuine context-window-overflow error skipped just that one chunk; every
 other `OllamaError` (Ollama unreachable, the embedding model not pulled,
-any other server error) is systemic -- every remaining chunk would fail
-identically -- and must still fail the whole batch fast rather than being
+any other server error) was systemic -- every remaining chunk would fail
+identically -- and had to fail the whole batch fast rather than being
 silently swallowed chunk-by-chunk.
+
+Session 33 moved `_rows_for` from one `embed()` call per chunk to grouped
+`embed_batch()` calls (a real, measured 17.8x-54x throughput win -- see
+`retrieve.py`'s module-level `EMBED_BATCH_SIZE` comment and
+`ollama_client.embed_batch`'s docstring). The per-chunk overflow-skip test
+below is replaced with a batch-shaped equivalent: `embed_batch` is now the
+monkeypatched seam, and only whole-batch failures (still systemic -- the
+one failure mode `/api/embed` can actually raise for) are exercised, since
+session 33 confirmed live that `/api/embed` does not raise on content-level
+overflow at all (it silently truncates), so there is no longer a per-chunk
+failure signal to simulate.
 """
 
 from __future__ import annotations
@@ -105,17 +116,7 @@ def test_query_top_k_leaves_a_short_fn_source_unchanged(tmp_path, monkeypatch):
     assert seen_text["text"] == short_fn_source
 
 
-def _context_length_overflow_error() -> OllamaError:
-    # Mirrors ollama_client._post's real rendering for a context-window
-    # overflow: "Ollama request to /api/embeddings failed (400): the input
-    # length exceeds the context length".
-    return OllamaError("Ollama request to /api/embeddings failed (400): the input length exceeds the context length")
-
-
 def _model_not_found_error() -> OllamaError:
-    # Also an HTTPError-caused OllamaError (same _post branch as the
-    # overflow case above), but systemic -- every chunk would fail the same
-    # way -- so it must NOT be treated like a per-chunk content failure.
     return OllamaError("Ollama model 'all-minilm' is not available (model not found). Run: ollama pull all-minilm")
 
 
@@ -127,88 +128,113 @@ def _chunk(rel_fname: str, n: int) -> Chunk:
     return Chunk(rel_fname=rel_fname, start_line=n, end_line=n + 1, text=f"chunk {n}")
 
 
-def test_rows_for_skips_only_the_chunk_that_overflowed_the_context_window(monkeypatch):
+def test_rows_for_embeds_all_chunks_via_embed_batch_preserving_order(monkeypatch):
     chunks = [_chunk("a.js", 0), _chunk("a.js", 1), _chunk("a.js", 2)]
+    seen_batches = []
 
-    def fake_embed(model, text, base_url=None):
-        if text == "chunk 1":
-            raise _context_length_overflow_error()
-        return [1.0, 0.0]
+    def fake_embed_batch(model, texts, base_url=None):
+        seen_batches.append(list(texts))
+        return [[float(i), 0.0] for i in range(len(texts))]
 
-    monkeypatch.setattr(retrieve_module, "embed", fake_embed)
+    monkeypatch.setattr(retrieve_module, "embed_batch", fake_embed_batch)
     rows = _rows_for(chunks, "all-minilm", "http://x")
 
-    assert [r["text"] for r in rows] == ["chunk 0", "chunk 2"]
+    assert [r["text"] for r in rows] == ["chunk 0", "chunk 1", "chunk 2"]
+    assert [r["vector"] for r in rows] == [[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]]
+    # One batch call for all 3 (well under EMBED_BATCH_SIZE).
+    assert seen_batches == [["chunk 0", "chunk 1", "chunk 2"]]
+
+
+def test_rows_for_splits_more_than_embed_batch_size_chunks_into_multiple_calls(monkeypatch):
+    n = retrieve_module.EMBED_BATCH_SIZE + 5
+    chunks = [_chunk("a.js", i) for i in range(n)]
+    seen_batch_sizes = []
+
+    def fake_embed_batch(model, texts, base_url=None):
+        seen_batch_sizes.append(len(texts))
+        return [[1.0, 0.0] for _ in texts]
+
+    monkeypatch.setattr(retrieve_module, "embed_batch", fake_embed_batch)
+    rows = _rows_for(chunks, "all-minilm", "http://x")
+
+    assert len(rows) == n
+    assert seen_batch_sizes == [retrieve_module.EMBED_BATCH_SIZE, 5]
 
 
 def test_rows_for_reraises_on_a_connectivity_level_failure(monkeypatch):
     chunks = [_chunk("a.js", 0), _chunk("a.js", 1)]
 
-    def fake_embed(model, text, base_url=None):
+    def fake_embed_batch(model, texts, base_url=None):
         raise _connection_refused_error()
 
-    monkeypatch.setattr(retrieve_module, "embed", fake_embed)
+    monkeypatch.setattr(retrieve_module, "embed_batch", fake_embed_batch)
 
     with pytest.raises(OllamaError):
         _rows_for(chunks, "all-minilm", "http://x")
 
 
-def test_rows_for_reraises_on_a_model_not_found_failure_rather_than_skipping_every_chunk(monkeypatch):
-    # Session 31 code-review finding: "model not found" is also an
-    # HTTPError-caused OllamaError (same ollama_client._post branch as a
-    # genuine context-length overflow), but it's systemic -- a misconfigured
-    # embedding_model_id -- and every chunk would fail identically. It must
-    # re-raise (surfacing the "Run: ollama pull <model>" diagnostic), not be
-    # silently skipped chunk-by-chunk down to an empty, unexplained result.
+def test_rows_for_reraises_on_a_model_not_found_failure(monkeypatch):
+    # "model not found" (a misconfigured embedding_model_id) is systemic --
+    # every chunk in every batch would fail identically -- so it must
+    # re-raise and surface the "Run: ollama pull <model>" diagnostic.
     chunks = [_chunk("a.js", 0), _chunk("a.js", 1)]
 
-    def fake_embed(model, text, base_url=None):
+    def fake_embed_batch(model, texts, base_url=None):
         raise _model_not_found_error()
 
-    monkeypatch.setattr(retrieve_module, "embed", fake_embed)
+    monkeypatch.setattr(retrieve_module, "embed_batch", fake_embed_batch)
 
     with pytest.raises(OllamaError, match="ollama pull"):
         _rows_for(chunks, "all-minilm", "http://x")
 
 
-def test_reindex_repo_chunks_keeps_other_files_chunks_when_one_chunk_fails(tmp_path, monkeypatch):
-    # Regression for the pre-session-31 bug: a single content-level embed
-    # failure anywhere in the repo used to discard every other chunk too
-    # (the whole pass aborted before store.replace_all() ever ran).
+def test_reindex_repo_chunks_embeds_chunks_from_every_file(tmp_path, monkeypatch):
     (tmp_path / "a.js").write_text("function a() { return 1; }\n", encoding="utf-8")
     (tmp_path / "b.js").write_text("function b() { return 2; }\n", encoding="utf-8")
 
-    def fake_embed(model, text, base_url=None):
-        if "a()" in text:
-            raise _context_length_overflow_error()
-        return [1.0, 0.0]
+    def fake_embed_batch(model, texts, base_url=None):
+        return [[1.0, 0.0] for _ in texts]
 
-    monkeypatch.setattr(retrieve_module, "embed", fake_embed)
+    monkeypatch.setattr(retrieve_module, "embed_batch", fake_embed_batch)
 
     store = VectorStore(str(tmp_path))
     embedded_count = reindex_repo_chunks(str(tmp_path), store, "all-minilm")
 
-    assert embedded_count == 1
+    assert embedded_count == 2
     rows = store.query([1.0, 0.0], 10)
-    assert len(rows) == 1
-    assert rows[0]["rel_fname"] == "b.js"
+    assert {row["rel_fname"] for row in rows} == {"a.js", "b.js"}
 
 
-def test_reindex_file_chunks_keeps_other_chunks_in_the_same_file_when_one_fails(tmp_path, monkeypatch):
-    # More than CHUNK_LINES lines so "FAIL" lands in its own, later chunk --
-    # confirms the first (good) chunk still gets embedded even though the
-    # second (bad) one fails.
+def test_reindex_repo_chunks_writes_nothing_when_the_embed_batch_call_fails(tmp_path, monkeypatch):
+    # A systemic embed_batch failure (session 33: the only kind /api/embed
+    # can actually raise) aborts before store.replace_all() runs -- same
+    # "fail loud, don't half-write" contract session 31 established for
+    # systemic failures specifically (connectivity, model not found).
+    (tmp_path / "a.js").write_text("function a() { return 1; }\n", encoding="utf-8")
+
+    def fake_embed_batch(model, texts, base_url=None):
+        raise _model_not_found_error()
+
+    monkeypatch.setattr(retrieve_module, "embed_batch", fake_embed_batch)
+
+    store = VectorStore(str(tmp_path))
+    with pytest.raises(OllamaError, match="ollama pull"):
+        reindex_repo_chunks(str(tmp_path), store, "all-minilm")
+
+    assert store.query([1.0, 0.0], 10) == []
+
+
+def test_reindex_file_chunks_embeds_every_chunk_in_the_file(tmp_path, monkeypatch):
     lines = "\n".join(f"const x{i} = {i};" for i in range(15))
-    (tmp_path / "a.js").write_text(lines + "\nconst FAIL = 1;\n", encoding="utf-8")
+    (tmp_path / "a.js").write_text(lines + "\nconst y = 1;\n", encoding="utf-8")
 
-    def fake_embed(model, text, base_url=None):
-        if "FAIL" in text:
-            raise _context_length_overflow_error()
-        return [1.0, 0.0]
+    def fake_embed_batch(model, texts, base_url=None):
+        return [[1.0, 0.0] for _ in texts]
 
-    monkeypatch.setattr(retrieve_module, "embed", fake_embed)
+    monkeypatch.setattr(retrieve_module, "embed_batch", fake_embed_batch)
 
     store = VectorStore(str(tmp_path))
     embedded_count = reindex_file_chunks(str(tmp_path), "a.js", store, "all-minilm")
 
-    assert embedded_count == 1
+    assert embedded_count >= 1
+    assert len(store.query([1.0, 0.0], 10)) == embedded_count
