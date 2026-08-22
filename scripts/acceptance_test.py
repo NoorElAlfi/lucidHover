@@ -66,6 +66,34 @@ _PLACEHOLDER_PATTERNS = ["n/a", "tbd", "todo", "and more", "etc."]
 # hedging about something it didn't know.
 _WEAK_PLACEHOLDER_PATTERNS = ["unknown"]
 
+# Session 28: the `recordNamespaced` defect from session-25 -- why_it_exists
+# claiming "no callees" in the same sentence `calls` names a real one. A
+# negation trigger word followed (within a short window, same sentence) by
+# "call"/"callee(s)" or "caller(s)" is a self-contradiction only when the
+# corresponding array is actually non-empty -- conservative and regex-based,
+# same "note not issue" treatment as every other heuristic in this file.
+_NEGATION_TRIGGER = r"(?:\bno\b|\bnot\b|\bnone\b|\bnever\b|\bwithout\b|\bdoesn'?t\b|\bdoes\s+not\b|\bdon'?t\b|\bdo\s+not\b)"
+_CALLEES_NEGATION_PATTERN = re.compile(_NEGATION_TRIGGER + r"[^.]{0,40}\bcall(?:s|ees?|ing)?\b", re.IGNORECASE)
+_CALLERS_NEGATION_PATTERN = re.compile(_NEGATION_TRIGGER + r"[^.]{0,40}\bcallers?\b", re.IGNORECASE)
+
+# Session 28: the verbatim-boilerplate hallucination from session-25
+# (`isEmpty<T>`, `handleLoginRoute`) -- the model copies prompt.py's own
+# illustrative side_effects category phrases into the answer instead of
+# grounding effects in the actual function body. One phrase matching is weak
+# evidence on its own (a function could genuinely do exactly one of these
+# things); 2+ appearing together, near-verbatim, is a much stronger signal
+# that the model is reciting the field-rule example rather than reading the
+# code.
+_BOILERPLATE_PATTERNS = {
+    "reads/writes a file": re.compile(r"\b(?:reads?|reading|writes?|writing)\s+(?:a|the)?\s*file\b", re.IGNORECASE),
+    "sends a message or notification": re.compile(
+        r"\bsend(?:s|ing)?\s+(?:a|the)?\s*message\s+or\s+notification\b", re.IGNORECASE
+    ),
+    "mutates a parameter or global": re.compile(
+        r"\bmutat(?:es?|ing)\s+(?:a|the)?\s*parameter\s+or\s+global\b", re.IGNORECASE
+    ),
+}
+
 
 def _find_def_tag(repo_map: RepoMap, rel_fname: str, name: str, line: int):
     for tag in repo_map.tags_by_file.get(rel_fname, []):
@@ -113,8 +141,21 @@ def _check_schema(
           real fallback value/string from the source) that flagging every occurrence as
           a hedge produces false positives (confirmed directly against a real repo --
           see session-08 artifact's follow-up).
-      Neither should count against the automated pass rate the way an actually-missing
-      field does.
+        - the comma-joined side_effects check: an array element with 2+ commas may be
+          several distinct effects joined into one string instead of split (see
+          prompt.py's side_effects field rule) -- a shape hint, not proof.
+        - the boilerplate-triad check: 2+ of prompt.py's own illustrative side_effects
+          category phrases ("reads/writes a file", "sends a message or notification",
+          "mutates a parameter or global") appearing together, near-verbatim, in one
+          explanation's side_effects -- a real defect class found in session-25
+          (`isEmpty<T>`, `handleLoginRoute`) where the model recited the field-rule
+          example instead of grounding effects in the actual function body.
+        - the calls/callers self-contradiction check: why_it_exists uses a negation
+          phrase about callees ("no callees", "doesn't call", ...) while `calls` is
+          non-empty, or the same for callers/`used_by` -- the session-25 `recordNamespaced`
+          defect (claims "no callees" in the same sentence that names one).
+      None of these should count against the automated pass rate the way an
+      actually-missing field does.
     """
     issues: list[str] = []
     notes: list[str] = []
@@ -153,6 +194,31 @@ def _check_schema(
                     f"effects into one array element instead of splitting them (see "
                     f"prompt.py's side_effects field rule): '{effect}'"
                 )
+
+        joined_effects = " ".join(e for e in side_effects if isinstance(e, str))
+        matched_boilerplate = [label for label, pattern in _BOILERPLATE_PATTERNS.items() if pattern.search(joined_effects)]
+        if len(matched_boilerplate) >= 2:
+            notes.append(
+                "side_effects contains 2+ of prompt.py's own illustrative category phrases "
+                f"near-verbatim ({', '.join(matched_boilerplate)}) -- may be a boilerplate copy "
+                "of the field-rule example rather than effects grounded in this function's "
+                "actual code, read it yourself"
+            )
+
+    why_it_exists = explanation.get("why_it_exists")
+    if isinstance(why_it_exists, str):
+        calls = explanation.get("calls")
+        if isinstance(calls, list) and calls and _CALLEES_NEGATION_PATTERN.search(why_it_exists):
+            notes.append(
+                "why_it_exists appears to say it has no callees / doesn't call anything, but "
+                f"calls is non-empty ({calls!r}) -- possible self-contradiction, read it yourself"
+            )
+        used_by = explanation.get("used_by")
+        if isinstance(used_by, list) and used_by and _CALLERS_NEGATION_PATTERN.search(why_it_exists):
+            notes.append(
+                "why_it_exists appears to say it has no callers, but used_by is non-empty "
+                f"({used_by!r}) -- possible self-contradiction, read it yourself"
+            )
 
     if explanation["risk_note"] is not None and not isinstance(explanation["risk_note"], str):
         issues.append("risk_note is neither a string nor null")
