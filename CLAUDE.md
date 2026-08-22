@@ -3,7 +3,7 @@
 ## What this project is
 
 See `codebase-explainer-vscode-extension.md` (v7) for the full spec, and
-`docs/planning/current-state.md` for what actually exists today — where the two disagree about the
+`lucidhover-current-state.md` for what actually exists today — where the two disagree about the
 present, current-state wins. Do not re-read either in full every session; the session prompt names
 the relevant section, and the most recent artifact in `.claude/sessions/` carries the live handoff.
 
@@ -161,6 +161,7 @@ value, not a placeholder to be renamed later.
 | 32 | Sidecar request-contention fix (sessions 26/29's carried-forward finding) — client-side interactive/background request-priority gate in `SidecarManager`/`BackgroundIndexManager`, no dispatch-loop changes; confirmed live against real pokerogue that a background request no longer fires 9s ahead of a pending interactive one, now correctly waits ~300ms after it clears | fix | Core | complete | [session-32-sidecar-request-contention-fix.md](.claude/sessions/session-32-sidecar-request-contention-fix.md) |
 | 33 | Indexing & caching efficiency audit (time/space complexity pass) — batched sidecar embedding calls (`embed_batch`, ~54x real throughput win, ~19.3hr → ~21.5min extrapolated full-repo embed at pokerogue scale), plus real-measured findings on `reindex_file()`'s whole-graph-rebuild cost, `chunk_repo()`'s stall (not reproducible, likely environmental), `VectorStore.query()`'s exact-scan cost (confirmed negligible), SQLite cache indexing (confirmed correct), and cache space growth (no eviction, flagged) | fix | Core | complete | [session-33-indexing-caching-efficiency-audit.md](.claude/sessions/session-33-indexing-caching-efficiency-audit.md) |
 | 34 | Small fixes bundle — five independent carried-forward loose ends: `roleCodeLensAutoRefresh.test.ts`'s cross-provider test-isolation bug (diagnosed and fixed, not just a flake), a `refreshEditor` per-editor version guard against overlapping redraws, a `SidecarManager.log()` disposed guard, a `double`/`makeCounter` arrow-const regression test, and two stale-doc syncs (Core Rule 12 amendment + fixtures directory tree) | fix | Core | complete | [session-34-small-fixes-bundle.md](.claude/sessions/session-34-small-fixes-bundle.md) |
+| 35 | Disposal-order confirmation + stale doc pointer fix — session 34's two carried-forward items: confirmed (against VS Code's real extension-host source) that the hypothesized output-channel-disposed-before-`SidecarManager` race can't occur, since `extension.ts`'s own `deactivate()` runs before VS Code ever disposes `context.subscriptions`; and fixed CLAUDE.md's stale `docs/planning/current-state.md` pointer to the file's real location, `lucidhover-current-state.md` | fix | Core | complete | [session-35-disposal-race-and-doc-pointer-fix.md](.claude/sessions/session-35-disposal-race-and-doc-pointer-fix.md) |
 
 ## File ownership (avoid overlapping edits across parallel work)
 
