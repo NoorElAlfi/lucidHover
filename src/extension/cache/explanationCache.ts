@@ -42,6 +42,8 @@ export class ExplanationCache {
     private readonly lookupByCacheKeyStmt;
     private readonly currentRowForFnIdStmt;
     private readonly writeStmt;
+    private readonly deleteByCacheKeyStmt;
+    private readonly purgeSupersededStmt;
 
     // No `vscode` dependency here (deliberate -- this class only needs
     // better-sqlite3, see the class doc comment), so this is a plain listener
@@ -95,16 +97,64 @@ export class ExplanationCache {
         // regeneration writes a new row for the new fn_hash -- ordering by
         // generated_at picks the one that was most recently the "live" row
         // for this fn_id under the current model/embedding/prompt tuple.
+        // `, rowid DESC` (Session 39 code-review finding) is a deliberate
+        // tiebreaker: `generated_at` is a caller-supplied ISO string, not
+        // guaranteed unique -- two rows for the same tuple could share it
+        // (stacked rows from `evictSuperseded=false`, or same-millisecond
+        // writes). Without an explicit tiebreaker this query and
+        // `purgeSupersededStmt` below (a differently-shaped window-function
+        // query over the same sort key) could resolve a tie differently,
+        // letting the purge sweep delete the exact row this statement had
+        // just reported as "current" -- rowid (monotonically assigned on
+        // insert, and reassigned on an INSERT OR REPLACE's implicit
+        // delete-then-reinsert of a same-cache_key row, so it always
+        // reflects insertion recency) makes both statements agree on "most
+        // recently inserted wins" instead.
         this.currentRowForFnIdStmt = this.db.prepare(`
             SELECT * FROM explanation_cache
             WHERE fn_id = ? AND model_id = ? AND embedding_model_id = ? AND prompt_version = ?
-            ORDER BY generated_at DESC LIMIT 1
+            ORDER BY generated_at DESC, rowid DESC LIMIT 1
         `);
 
         this.writeStmt = this.db.prepare(`
             INSERT OR REPLACE INTO explanation_cache
                 (cache_key, fn_id, explanation_json, fn_hash, context_hash, model_id, embedding_model_id, prompt_version, context_tier, generated_at)
             VALUES (@cache_key, @fn_id, @explanation_json, @fn_hash, @context_hash, @model_id, @embedding_model_id, @prompt_version, @context_tier, @generated_at)
+        `);
+
+        this.deleteByCacheKeyStmt = this.db.prepare(`DELETE FROM explanation_cache WHERE cache_key = ?`);
+
+        // Session 39 (cache eviction policy, "automatic narrow" per the
+        // user's explicit choice): a full-table sweep using the SAME narrow
+        // definition `write()`'s auto-evict uses -- per (fn_id, model_id,
+        // embedding_model_id, prompt_version) tuple, keep only the row with
+        // the greatest generated_at, drop every other row in that tuple.
+        // Deliberately does NOT cross tuples: a row orphaned by a
+        // model/embedding/prompt_version bump sits in its OWN tuple (it's
+        // the only/most-recent row there), so this never touches it -- same
+        // documented limitation as the auto-evict path, not a bug. Used by
+        // both the manual purge command and (when a fn_id accumulated
+        // multiple rows while auto-evict was toggled off) as the catch-up
+        // sweep once it's toggled back on or run explicitly.
+        // `, rowid DESC` -- the same tiebreaker `currentRowForFnIdStmt`
+        // uses above, and for the same reason: without it, a
+        // `generated_at` tie within a tuple could make this window
+        // function pick a different row as rank-1 than
+        // `currentRowForFnIdStmt` would report as "current", so this sweep
+        // could delete the row a caller had just been told was live.
+        this.purgeSupersededStmt = this.db.prepare(`
+            DELETE FROM explanation_cache
+            WHERE cache_key NOT IN (
+                SELECT cache_key FROM (
+                    SELECT cache_key,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY fn_id, model_id, embedding_model_id, prompt_version
+                               ORDER BY generated_at DESC, rowid DESC
+                           ) AS rn
+                    FROM explanation_cache
+                )
+                WHERE rn = 1
+            )
         `);
     }
 
@@ -149,11 +199,56 @@ export class ExplanationCache {
         ) as CacheRow | undefined;
     }
 
-    write(row: CacheRow): void {
+    /**
+     * `evictSuperseded` (Session 39, default true, gated by
+     * `lucidHover.autoEvictSupersededCache`): the "automatic narrow"
+     * eviction policy -- when this write regenerates a `fn_id` under the
+     * SAME model/embedding/prompt tuple (a genuine content-hash change per
+     * session 13's staleness detection, so `cache_key` differs from
+     * whatever `getCurrentRowForFnId` currently returns for this tuple),
+     * the OLD row is deleted right after the new one is durably written.
+     * Looked up via `currentRowForFnIdStmt` -- the same statement session
+     * 13's staleness detection uses to define "the current live row" -- so
+     * a row is only ever deleted once it is provably no longer that row.
+     * Deliberately narrow: does NOT reach across a model/embedding/prompt
+     * tuple change (a `PROMPT_VERSION` bump, for example), since
+     * `currentRowForFnIdStmt` filters on that exact tuple and simply finds
+     * no `previous` row to delete when it changes -- see
+     * `purgeSupersededStmt`'s doc comment for the same limitation applied
+     * to the manual sweep.
+     */
+    write(row: CacheRow, evictSuperseded = true): void {
+        const previous = evictSuperseded
+            ? (this.currentRowForFnIdStmt.get(
+                  row.fn_id,
+                  row.model_id,
+                  row.embedding_model_id,
+                  row.prompt_version
+              ) as CacheRow | undefined)
+            : undefined;
+
         this.writeStmt.run(row);
+
+        if (previous && previous.cache_key !== row.cache_key) {
+            this.deleteByCacheKeyStmt.run(previous.cache_key);
+        }
+
         for (const listener of this.writeListeners) {
             listener(row);
         }
+    }
+
+    /**
+     * Manual sweep (Session 39, "LucidHover: Purge Superseded Cache Rows"):
+     * applies `write()`'s same narrow per-tuple "keep only the newest row"
+     * rule across the whole table in one pass, rather than only at the
+     * moment of a regenerating write. Useful when
+     * `lucidHover.autoEvictSupersededCache` is off (rows accumulate until
+     * this is run explicitly) or to sweep rows that piled up before this
+     * feature existed. Returns the number of rows deleted.
+     */
+    purgeSupersededRows(): number {
+        return this.purgeSupersededStmt.run().changes as number;
     }
 
     /** Fires after every write (regenerate or first-generate), whatever the caller. */

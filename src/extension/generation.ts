@@ -1,5 +1,5 @@
 import { ExplanationCache, CacheRow } from './cache/explanationCache';
-import { EMBEDDING_MODEL_ID, PROMPT_VERSION, resolveModelId } from './cache/config';
+import { EMBEDDING_MODEL_ID, PROMPT_VERSION, resolveAutoEvictSupersededCache, resolveModelId } from './cache/config';
 import { computeCacheKey } from './cache/hash';
 import { ResolvedFunction } from './functionResolution';
 import { RequestPriority, SidecarManager } from './sidecar/sidecarManager';
@@ -76,6 +76,6 @@ export async function generateAndCache(
         context_tier: result.context_tier,
         generated_at: new Date().toISOString(),
     };
-    cache.write(row);
+    cache.write(row, resolveAutoEvictSupersededCache());
     return row;
 }
