@@ -9,6 +9,12 @@ import { SidecarManager } from '../sidecar/sidecarManager';
 
 export const EXPLANATION_PANEL_VIEW_ID = 'lucidhover.explanationPanel';
 export const SHOW_MORE_COMMAND_ID = 'lucidhover.showMore';
+// Owned here, not blastRadiusCommand.ts, so that file can import it (and the
+// graph-view types below) without a circular import back to this one.
+export const SHOW_BLAST_RADIUS_COMMAND_ID = 'lucidhover.showBlastRadius';
+// Session 46: same reasoning as SHOW_BLAST_RADIUS_COMMAND_ID above -- owned
+// here so callTraceCommand.ts can import it without a circular import.
+export const SHOW_CALL_TRACE_COMMAND_ID = 'lucidhover.traceExecutionPath';
 const NAVIGATE_COMMAND_ID = 'lucidhover.navigateToFunction';
 
 interface ExplanationFields {
@@ -17,6 +23,91 @@ interface ExplanationFields {
     calls?: string[];
     side_effects?: string[];
     risk_note?: string | null;
+}
+
+/**
+ * Session 45: one node in a pinned graph-view render (blast radius; session
+ * 46's execution trace reuses the same shape). `roleTag`/`oneLiner` are
+ * populated by the caller (blastRadiusCommand.ts / callTraceCommand.ts) from
+ * its own `ExplanationCache` lookup, per Core Rule 9 -- the sidecar only
+ * ever returns bare rel_fname/name/line/importance/depth graph facts, never
+ * cache data. Left undefined for a node with no cache row yet; the renderer
+ * shows those bare rather than treating undefined as an error state.
+ */
+export interface GraphViewNode {
+    relFname: string;
+    name: string;
+    line: number;
+    depth: number;
+    importance: number;
+    roleTag?: string;
+    oneLiner?: string;
+}
+
+/** One caller->callee graph fact, independent of either endpoint's node-list entry (an endpoint outside the walk's depth cap still produces a real edge). */
+export interface GraphViewEdge {
+    callerRelFname: string;
+    callerName: string;
+    callerLine: number;
+    calleeRelFname: string;
+    calleeName: string;
+    calleeLine: number;
+}
+
+/**
+ * Session 47: how many *additional* new nodes existed at a given depth
+ * beyond the walk's per-level fan-out cap (`BLAST_RADIUS_LEVEL_CAP` in
+ * `sidecar/repomap/context.py`) -- one entry per depth that actually
+ * omitted something, not a dense depth-indexed array. Currently only
+ * populated for blast radius (`direction: 'upstream'`); execution trace's
+ * single-primary-path walk has nothing to omit (one node per depth), so it
+ * always sends an empty array.
+ */
+export interface GraphViewOmission {
+    depth: number;
+    omittedCount: number;
+}
+
+/**
+ * Session 48: the non-primary confident callees passed over at a given hop
+ * of an execution trace's primary path -- what session 46's v1 scope cut
+ * silently dropped. `depth` matches the primary-path `GraphViewNode.depth`
+ * whose hop produced this branch point, so the renderer can attach a
+ * "+N other calls from here" expansion right after that node. `alternates`
+ * are enriched the same way primary nodes are (`callTraceCommand.ts`'s
+ * `enrichOne`) and rendered with the same cached/uncached treatment --
+ * they're just never walked further (this session's v1 scope: one hop of
+ * alternates, not a second recursive tree). `omittedCount` mirrors
+ * `GraphViewOmission`'s cap-overflow count (same reused
+ * `RepoMap._cap`/`CALLER_CALLEE_CAP` on the sidecar side, session 47's
+ * pattern). Currently only populated for execution trace
+ * (`direction: 'downstream'`); blast radius always sends an empty array.
+ */
+export interface GraphViewBranchPoint {
+    depth: number;
+    alternates: GraphViewNode[];
+    omittedCount: number;
+}
+
+/**
+ * Generic graph-view payload (Session 45): nodes + edges + direction, not
+ * pre-grouped by depth -- so session 46's linear-chain execution-trace view
+ * (`callTraceCommand.ts`) reuses this same shape and the same pinned-panel
+ * plumbing rather than building a second renderer from scratch. `direction`
+ * records which way the walk went ('upstream' = blast radius, "who calls
+ * this, transitively"; 'downstream' = execution trace, "what does this
+ * call, transitively") -- the webview's own message handler uses it to pick
+ * between the depth-grouped renderer (`renderGraph`) and the linear-timeline
+ * one (`renderTrace`).
+ */
+export interface GraphViewPayload {
+    title: string;
+    direction: 'upstream' | 'downstream';
+    rootName: string;
+    nodes: GraphViewNode[];
+    edges: GraphViewEdge[];
+    omissions: GraphViewOmission[];
+    branches: GraphViewBranchPoint[];
 }
 
 const NAVIGABLE_SYMBOL_KINDS = new Set<vscode.SymbolKind>([
@@ -50,6 +141,16 @@ function fnNameFromFnId(fnId: string): string {
 export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
     private view: vscode.WebviewView | undefined;
     private pendingRow: CacheRow | undefined;
+    private pendingGraph: GraphViewPayload | undefined;
+    /**
+     * Session 45: true while a graph view (blast radius, and later session
+     * 46's execution trace) is pinned -- cursor movement must not overwrite
+     * it, unlike the normal cursor-synced explanation view. Cleared only by
+     * the webview's own "<- Back" control (a `back` message), never by a
+     * timeout or an editor event, so the user's graph stays put until they
+     * explicitly leave it.
+     */
+    private pinned = false;
 
     constructor(
         private readonly getWorkspaceRoot: () => string | undefined,
@@ -65,11 +166,18 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
         webviewView.webview.onDidReceiveMessage((message: { type?: string; name?: string }) => {
             if (message?.type === 'navigate' && message.name) {
                 void vscode.commands.executeCommand(NAVIGATE_COMMAND_ID, message.name);
+            } else if (message?.type === 'showBlastRadius') {
+                void vscode.commands.executeCommand(SHOW_BLAST_RADIUS_COMMAND_ID);
+            } else if (message?.type === 'traceExecutionPath') {
+                void vscode.commands.executeCommand(SHOW_CALL_TRACE_COMMAND_ID);
+            } else if (message?.type === 'back') {
+                this.pinned = false;
+                this.refreshFromActiveEditor();
             }
         });
 
         webviewView.onDidChangeVisibility(() => {
-            if (webviewView.visible) {
+            if (webviewView.visible && !this.pinned) {
                 this.refreshFromActiveEditor();
             }
         });
@@ -78,7 +186,11 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
             this.view = undefined;
         });
 
-        if (this.pendingRow) {
+        if (this.pendingGraph) {
+            this.pinned = true;
+            this.postGraph(this.pendingGraph);
+            this.pendingGraph = undefined;
+        } else if (this.pendingRow) {
             this.postRow(this.pendingRow);
             this.pendingRow = undefined;
         } else {
@@ -92,6 +204,7 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
      * mouse when hovering can differ from wherever the text cursor is.
      */
     showRow(row: CacheRow): void {
+        this.pinned = false;
         if (this.view) {
             this.postRow(row);
         } else {
@@ -101,14 +214,28 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
         }
     }
 
+    /**
+     * Pins a graph view (Session 45) in place, independent of cursor
+     * position -- used by blastRadiusCommand.ts. Cursor movement won't
+     * overwrite it until the user clicks the view's own "<- Back" control.
+     */
+    showGraph(payload: GraphViewPayload): void {
+        this.pinned = true;
+        if (this.view) {
+            this.postGraph(payload);
+        } else {
+            this.pendingGraph = payload;
+        }
+    }
+
     /** Reveals/focuses the panel via the view's auto-generated `.focus` command (stable API). */
     async reveal(): Promise<void> {
         await vscode.commands.executeCommand(`${EXPLANATION_PANEL_VIEW_ID}.focus`);
     }
 
-    /** Cursor-sync entry point. Only does work while the panel is actually visible. */
+    /** Cursor-sync entry point. Only does work while the panel is actually visible and not pinned to a graph view. */
     onSelectionChanged(editor: vscode.TextEditor): void {
-        if (!this.view?.visible) {
+        if (!this.view?.visible || this.pinned) {
             return;
         }
         if (editor !== vscode.window.activeTextEditor) {
@@ -170,6 +297,13 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
         void this.view.webview.postMessage({ type: 'empty', fnName });
     }
 
+    private postGraph(payload: GraphViewPayload): void {
+        if (!this.view) {
+            return;
+        }
+        void this.view.webview.postMessage({ type: 'renderGraph', payload });
+    }
+
     private renderHtml(webview: vscode.Webview): string {
         const nonce = crypto.randomBytes(16).toString('hex');
         const csp = [
@@ -224,6 +358,33 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
     }
     .risk-note {
         color: var(--vscode-editorWarning-foreground, var(--vscode-foreground));
+    }
+    .back-link {
+        margin: 0 0 12px 0;
+    }
+    .graph-node {
+        margin: 0 0 10px 0;
+    }
+    .graph-node-location {
+        color: var(--vscode-descriptionForeground);
+        font-size: 0.9em;
+        margin-left: 4px;
+    }
+    .graph-node-desc {
+        margin: 2px 0 0 0;
+    }
+    .branch-toggle {
+        margin: 0 0 10px 18px;
+    }
+    .branch-toggle summary {
+        cursor: pointer;
+        color: var(--vscode-textLink-foreground);
+    }
+    .branch-toggle summary:hover {
+        text-decoration: underline;
+    }
+    .branch-toggle .graph-node {
+        margin: 8px 0 0 0;
     }
 </style>
 </head>
@@ -304,6 +465,20 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
             addSection('Used by');
             addNameLinks(explanation.used_by);
         }
+        const blastBtn = document.createElement('button');
+        blastBtn.className = 'name-link';
+        blastBtn.textContent = 'See full blast radius →';
+        blastBtn.addEventListener('click', () => {
+            vscode.postMessage({ type: 'showBlastRadius' });
+        });
+        content.appendChild(blastBtn);
+        const traceBtn = document.createElement('button');
+        traceBtn.className = 'name-link';
+        traceBtn.textContent = 'Trace execution from here →';
+        traceBtn.addEventListener('click', () => {
+            vscode.postMessage({ type: 'traceExecutionPath' });
+        });
+        content.appendChild(traceBtn);
         if (Array.isArray(explanation.calls) && explanation.calls.length > 0) {
             addSection('Calls');
             addNameLinks(explanation.calls);
@@ -318,12 +493,169 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
         }
     }
 
+    function addBackLink() {
+        const btn = document.createElement('button');
+        btn.className = 'name-link back-link';
+        btn.textContent = '← Back';
+        btn.addEventListener('click', () => {
+            vscode.postMessage({ type: 'back' });
+        });
+        content.appendChild(btn);
+    }
+
+    // Session 45: generic depth-grouped list renderer -- takes nodes + edges
+    // + direction (payload.edges isn't used by this particular render mode
+    // yet, but the data is here so a future mode, e.g. session 46's linear
+    // execution-trace view, doesn't need a second RPC/enrichment round trip
+    // to get it).
+    function renderGraphNode(node, container) {
+        container = container || content;
+        const wrap = document.createElement('div');
+        wrap.className = 'graph-node';
+
+        const btn = document.createElement('button');
+        btn.className = 'name-link';
+        btn.textContent = node.name;
+        btn.addEventListener('click', () => {
+            vscode.postMessage({ type: 'navigate', name: node.name });
+        });
+        wrap.appendChild(btn);
+
+        const loc = document.createElement('span');
+        loc.className = 'graph-node-location';
+        loc.textContent = node.relFname + ':' + (node.line + 1);
+        wrap.appendChild(loc);
+
+        const desc = document.createElement('p');
+        if (node.roleTag || node.oneLiner) {
+            desc.className = 'graph-node-desc';
+            desc.textContent = [node.roleTag, node.oneLiner].filter(Boolean).join(' — ');
+        } else {
+            desc.className = 'graph-node-desc empty-state';
+            desc.textContent = 'Not yet indexed.';
+        }
+        wrap.appendChild(desc);
+
+        container.appendChild(wrap);
+    }
+
+    // Session 48: the inline "+N other calls from here" expansion for a
+    // trace hop's non-primary confident callees -- a plain <details> so
+    // expand/collapse needs no script-side event wiring beyond what the
+    // browser gives <details>/<summary> natively. Each alternate renders
+    // through the same renderGraphNode used for primary nodes, so an
+    // uncached alternate gets the identical "Not yet indexed." placeholder.
+    function renderBranchPoint(branchPoint) {
+        const totalOther = branchPoint.alternates.length + branchPoint.omittedCount;
+        if (totalOther === 0) {
+            return;
+        }
+        const details = document.createElement('details');
+        details.className = 'branch-toggle';
+
+        const summary = document.createElement('summary');
+        summary.textContent = '+' + totalOther + ' other call' + (totalOther === 1 ? '' : 's') + ' from here';
+        details.appendChild(summary);
+
+        for (const alt of branchPoint.alternates) {
+            renderGraphNode(alt, details);
+        }
+        if (branchPoint.omittedCount > 0) {
+            const omittedP = document.createElement('p');
+            omittedP.className = 'empty-state';
+            omittedP.textContent = '+' + branchPoint.omittedCount + ' more not shown';
+            details.appendChild(omittedP);
+        }
+
+        content.appendChild(details);
+    }
+
+    function renderGraph(payload) {
+        clear();
+        addBackLink();
+
+        const h = document.createElement('h3');
+        h.textContent = payload.title;
+        content.appendChild(h);
+
+        if (payload.nodes.length === 0) {
+            const noun = payload.direction === 'upstream' ? 'callers' : 'callees';
+            addParagraph('No ' + noun + ' found within the search depth.', 'empty-state');
+            return;
+        }
+
+        const maxDepth = payload.nodes.reduce((max, n) => Math.max(max, n.depth), 0);
+        for (let depth = 1; depth <= maxDepth; depth++) {
+            const atDepth = payload.nodes.filter((n) => n.depth === depth);
+            if (atDepth.length === 0) {
+                continue;
+            }
+            addSection('Level ' + depth);
+            for (const node of atDepth) {
+                renderGraphNode(node);
+            }
+            // Session 47: the per-level fan-out cap omits nodes rather than
+            // silently truncating -- surface that as a plain note under the
+            // level it applies to, not a new UI affordance.
+            const omission = payload.omissions.find((o) => o.depth === depth);
+            if (omission) {
+                addParagraph('+' + omission.omittedCount + ' more not shown', 'empty-state');
+            }
+        }
+    }
+
+    // Session 46: a linear-chain timeline renderer, reusing renderGraphNode
+    // (including its "Not yet indexed." placeholder for an uncached hop) but
+    // laid out as an ordered sequence rather than session 45's depth-grouped
+    // "Level N" sections -- a single-primary-path downstream trace has
+    // exactly one node per depth, so grouping by depth would just be a list
+    // of one-item groups.
+    function renderTrace(payload) {
+        clear();
+        addBackLink();
+
+        const h = document.createElement('h3');
+        h.textContent = payload.title;
+        content.appendChild(h);
+
+        const start = document.createElement('p');
+        start.textContent = payload.rootName + ' (start)';
+        content.appendChild(start);
+
+        if (payload.nodes.length === 0) {
+            addParagraph('No confident downstream calls found from here.', 'empty-state');
+            return;
+        }
+
+        const ordered = payload.nodes.slice().sort((a, b) => a.depth - b.depth);
+        for (const node of ordered) {
+            const arrow = document.createElement('p');
+            arrow.className = 'graph-node-location';
+            arrow.textContent = '↓ calls';
+            content.appendChild(arrow);
+            renderGraphNode(node);
+            // Session 48: a branch point's depth matches the primary node
+            // whose hop produced it (see GraphViewBranchPoint's own doc
+            // comment) -- render it right after that node.
+            const branchPoint = payload.branches.find((b) => b.depth === node.depth);
+            if (branchPoint) {
+                renderBranchPoint(branchPoint);
+            }
+        }
+    }
+
     window.addEventListener('message', (event) => {
         const message = event.data;
         if (message.type === 'render') {
             renderExplanation(message.fnName, message.explanation);
         } else if (message.type === 'empty') {
             renderEmpty(message.fnName);
+        } else if (message.type === 'renderGraph') {
+            if (message.payload.direction === 'downstream') {
+                renderTrace(message.payload);
+            } else {
+                renderGraph(message.payload);
+            }
         }
     });
 

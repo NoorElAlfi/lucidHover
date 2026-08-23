@@ -20,6 +20,33 @@ from .rank import compute_importance
 
 CALLER_CALLEE_CAP = 15
 
+# Session 45: hardcoded, not a setting -- see the session brief's
+# source-material note ("nothing here yet establishes that a fixed,
+# reasonable default is insufficient; add a setting later if real use
+# surfaces a need, not preemptively").
+BLAST_RADIUS_MAX_DEPTH = 3
+
+# Session 47: per-level fan-out cap for get_blast_radius, closing session 45's
+# own carried-forward gap. Measured against real pokerogue (6,633 functions)
+# before adding this: several real high-fan-in functions (e.g.
+# `getPokemonNameWithAffix`, 287 direct confident callers) returned 400-500+
+# total nodes and thousands of edges at the existing max_depth=3 -- a real,
+# observed problem, not a hypothetical one (see session-47 artifact for the
+# full measurement table). Reuses CALLER_CALLEE_CAP's value rather than a new
+# number: it's the same "how many related functions to show a human" judgment
+# call `get_function_context`'s single-hop callers/callees already makes, and
+# users are already used to that convention. Applied once per depth level (up
+# to BLAST_RADIUS_LEVEL_CAP *new* nodes admitted per level), not as a single
+# global cap on the whole walk -- a global cap would silently starve whichever
+# depth is reached last. At 3 levels this bounds the walk to at most
+# 3 * BLAST_RADIUS_LEVEL_CAP = 45 nodes, still far below the unbounded
+# real-repo measurements above.
+BLAST_RADIUS_LEVEL_CAP = CALLER_CALLEE_CAP
+
+# Session 46: same reasoning as BLAST_RADIUS_MAX_DEPTH above, hardcoded not
+# a setting.
+CALL_TRACE_MAX_DEPTH = 3
+
 
 @dataclass(frozen=True)
 class RelatedFunction:
@@ -38,6 +65,108 @@ class FunctionContext:
     callers_omitted: int = 0
     callees: list[RelatedFunction] = field(default_factory=list)
     callees_omitted: int = 0
+
+
+@dataclass(frozen=True)
+class BlastRadiusNode:
+    rel_fname: str
+    name: str
+    line: int
+    importance: float
+    depth: int
+
+
+@dataclass(frozen=True)
+class BlastRadiusEdge:
+    caller_rel_fname: str
+    caller_name: str
+    caller_line: int
+    callee_rel_fname: str
+    callee_name: str
+    callee_line: int
+
+
+@dataclass(frozen=True)
+class BlastRadiusOmission:
+    """Session 47: how many *additional* new callers existed at a given
+    depth beyond BLAST_RADIUS_LEVEL_CAP -- one entry per depth that actually
+    omitted something, not a dense depth-indexed structure (a depth with
+    nothing omitted has no entry)."""
+
+    depth: int
+    omitted_count: int
+
+
+@dataclass(frozen=True)
+class BlastRadius:
+    rel_fname: str
+    name: str
+    line: int
+    nodes: list[BlastRadiusNode] = field(default_factory=list)
+    edges: list[BlastRadiusEdge] = field(default_factory=list)
+    omissions: list[BlastRadiusOmission] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class CallTraceNode:
+    rel_fname: str
+    name: str
+    line: int
+    importance: float
+    depth: int
+
+
+@dataclass(frozen=True)
+class CallTraceEdge:
+    caller_rel_fname: str
+    caller_name: str
+    caller_line: int
+    callee_rel_fname: str
+    callee_name: str
+    callee_line: int
+
+
+@dataclass(frozen=True)
+class CallTraceBranchPoint:
+    """Session 48: the non-primary confident callees passed over at a given
+    hop -- every confident callee of that hop's caller besides the one
+    chosen to continue the primary path. `depth` matches the primary-path
+    node recorded for that same hop (`CallTraceNode.depth`), so the
+    extension host/panel can attach a branch point to "the node just
+    walked into" the same way `BlastRadiusOmission` attaches to a depth.
+    One entry per depth that actually has an alternate, not a dense
+    depth-indexed array (same sparse convention as `BlastRadiusOmission`).
+
+    Reuses `RepoMap._cap`/`CALLER_CALLEE_CAP` as-is for the same
+    "how many related functions to show a human" cap `get_function_context`
+    and `get_blast_radius` (session 47) already apply -- no new constant,
+    per this session's own instruction to reuse the existing
+    constant/pattern rather than invent a new number. Measured against real
+    pokerogue (6,633 functions) before adding this: 246 functions have more
+    than 15 confident callees at a single hop (e.g. `initMoves` in
+    `src/data/moves/move.ts`, 248) -- a real, observed fan-out problem, not
+    a hypothetical one.
+
+    Unlike blast radius's `omitted_ever`, a branch here is never itself
+    walked further (this session's deliberate v1 scope, per the
+    AskUserQuestion answer: an inline "+N other calls from here" expansion,
+    not a second recursive tree) -- so there is no resurfacing concern to
+    replicate; each hop's branch cap is independent and one-shot.
+    """
+
+    depth: int
+    alternates: list[RelatedFunction] = field(default_factory=list)
+    omitted_count: int = 0
+
+
+@dataclass(frozen=True)
+class CallTrace:
+    rel_fname: str
+    name: str
+    line: int
+    nodes: list[CallTraceNode] = field(default_factory=list)
+    edges: list[CallTraceEdge] = field(default_factory=list)
+    branches: list[CallTraceBranchPoint] = field(default_factory=list)
 
 
 class RepoMap:
@@ -160,6 +289,215 @@ class RepoMap:
             callees=callees,
             callees_omitted=callees_omitted,
         )
+
+    def get_blast_radius(
+        self, rel_fname: str, name: str, line: int, max_depth: int = BLAST_RADIUS_MAX_DEPTH
+    ) -> BlastRadius:
+        """
+        Session 45: "if I change this function, what's affected" -- a
+        transitive-upstream-caller walk, the multi-hop generalization of
+        `get_function_context()`'s single-hop `callers` list. Reuses the same
+        `confident`-edges-only filter (see graph.py's module docstring and
+        Session 44) so an ambiguous name collision never shows up as an
+        asserted real caller here either.
+
+        BFS over `self.graph` predecessors, depth-capped at `max_depth`, with
+        a visited-node set so a recursive/cyclic call chain (mutual
+        recursion, an event-handler loop) terminates instead of looping
+        forever. A node is recorded once, at the depth it was first reached
+        (BFS guarantees that's its shortest upstream distance) and is never
+        re-expanded from a deeper path; an edge into an already-visited node
+        is still recorded, since it's a real graph fact (e.g. two different
+        depth-1 callers both funneling into the same depth-2 function).
+
+        Returns plain graph facts only (rel_fname/name/line/importance per
+        node, edges as caller->callee pairs) -- no cache lookups, no
+        role_tag/one_liner. Per Core Rule 9, the extension host
+        (blastRadiusCommand.ts) is the one that enriches these with cached
+        data afterward; the sidecar has no idea what's cached.
+
+        Session 47: fan-out is capped per level at BLAST_RADIUS_LEVEL_CAP new
+        callers -- among the *new* (not-yet-visited, not-previously-omitted)
+        callers discovered at a depth, only the top BLAST_RADIUS_LEVEL_CAP by
+        importance are added as nodes and expanded into the next level; the
+        rest are dropped from both `nodes` and `edges` (an edge into an
+        omitted caller would just reproduce the same unbounded fan-out this
+        cap exists to avoid) and counted in `omissions` instead. An edge into
+        an already-visited caller (a convergent path from an earlier depth)
+        is unaffected by the cap and is still recorded, same as before -- it
+        doesn't add a new node, so it can't blow up the walk the way new
+        fan-out can.
+
+        Once a caller is omitted at some depth, it stays omitted for the
+        rest of the walk (tracked in `omitted_ever`, separately from
+        `visited`) -- it must never resurface at a *deeper* level just
+        because a second, indirect/longer edge into it happens to exist from
+        an already-kept node. Without this, the shortest-distance-recorded
+        invariant above would silently break for exactly the nodes the cap
+        is supposed to hide: an omitted node could reappear one or more
+        levels later, at the wrong depth, with its true (shorter, capped)
+        edge dropped and only the longer alternate edge shown instead.
+        """
+        node_id: NodeId = (rel_fname, name, line)
+        if self.graph is None or node_id not in self.graph:
+            return BlastRadius(rel_fname=rel_fname, name=name, line=line)
+
+        visited: set[NodeId] = {node_id}
+        omitted_ever: set[NodeId] = set()
+        nodes: list[BlastRadiusNode] = []
+        edges: list[BlastRadiusEdge] = []
+        omissions: list[BlastRadiusOmission] = []
+        frontier: list[NodeId] = [node_id]
+
+        for depth in range(1, max_depth + 1):
+            candidate_pairs: list[tuple[NodeId, NodeId]] = [
+                (caller, current)
+                for current in frontier
+                for caller in self.graph.predecessors(current)
+                if self.graph[caller][current].get("confident")
+            ]
+
+            new_callers = sorted(
+                {caller for caller, _ in candidate_pairs if caller not in visited and caller not in omitted_ever},
+                key=lambda n: -self.importance.get(n, 0.0),
+            )
+            kept = set(new_callers[:BLAST_RADIUS_LEVEL_CAP])
+            omitted_this_level = new_callers[BLAST_RADIUS_LEVEL_CAP:]
+            if omitted_this_level:
+                omissions.append(BlastRadiusOmission(depth=depth, omitted_count=len(omitted_this_level)))
+            omitted_ever.update(omitted_this_level)
+
+            next_frontier: list[NodeId] = []
+            for caller, current in candidate_pairs:
+                if caller in visited:
+                    edges.append(
+                        BlastRadiusEdge(
+                            caller_rel_fname=caller[0],
+                            caller_name=caller[1],
+                            caller_line=caller[2],
+                            callee_rel_fname=current[0],
+                            callee_name=current[1],
+                            callee_line=current[2],
+                        )
+                    )
+                    continue
+                if caller not in kept:
+                    # Either omitted just now, or already-omitted at an
+                    # earlier depth and rediscovered here via a second edge
+                    # -- neither case gets a node or an edge (see docstring).
+                    continue
+                edges.append(
+                    BlastRadiusEdge(
+                        caller_rel_fname=caller[0],
+                        caller_name=caller[1],
+                        caller_line=caller[2],
+                        callee_rel_fname=current[0],
+                        callee_name=current[1],
+                        callee_line=current[2],
+                    )
+                )
+                visited.add(caller)
+                nodes.append(
+                    BlastRadiusNode(
+                        rel_fname=caller[0],
+                        name=caller[1],
+                        line=caller[2],
+                        importance=self.importance.get(caller, 0.0),
+                        depth=depth,
+                    )
+                )
+                next_frontier.append(caller)
+            frontier = next_frontier
+            if not frontier:
+                break
+
+        return BlastRadius(rel_fname=rel_fname, name=name, line=line, nodes=nodes, edges=edges, omissions=omissions)
+
+    def get_call_trace(
+        self, rel_fname: str, name: str, line: int, max_depth: int = CALL_TRACE_MAX_DEPTH
+    ) -> CallTrace:
+        """
+        Session 46: "follow this one call chain end-to-end" -- a downstream
+        walk over `self.graph` successors, the mirror image of
+        `get_blast_radius`'s upstream BFS over predecessors. Same
+        confident-edges-only filter as `get_function_context`/
+        `get_blast_radius` (Session 44).
+
+        Deliberate v1 scope cut, per this session's own brief (Core Rule 8 --
+        one session, one milestone): at each hop, only the single
+        highest-importance confident callee is followed as the "primary
+        path". This returns one linear chain, not a branching tree of every
+        possible downstream call -- alternate-path exploration is a real
+        follow-up idea, not attempted here.
+
+        Cycle-safe via the same visited-node-set approach as
+        `get_blast_radius`: if the chosen next callee is already on the
+        path (mutual/self recursion), the edge closing the loop is still
+        recorded as a real graph fact, but the walk does not re-add it as a
+        node or continue past it -- so a cyclic call chain terminates
+        instead of looping forever.
+
+        Returns plain graph facts only (rel_fname/name/line/importance per
+        node, edges as caller->callee pairs) -- no cache lookups, no
+        role_tag/one_liner. Per Core Rule 9, the extension host
+        (callTraceCommand.ts) enriches these from its own ExplanationCache
+        afterward; the sidecar has no idea what's cached.
+
+        Session 48: alongside the primary path, also records the
+        non-primary confident callees at each hop as `branches`
+        (`CallTraceBranchPoint`, see its own docstring) -- the answer to
+        v1's "silently swallows every other real downstream call" scope cut
+        (session 46). A branch point is only recorded for a hop that
+        actually produced a primary-path node (i.e. not for the final,
+        cycle-closing hop where the walk breaks before adding one) so every
+        branch point's `depth` always matches a real `CallTraceNode.depth`.
+        """
+        node_id: NodeId = (rel_fname, name, line)
+        if self.graph is None or node_id not in self.graph:
+            return CallTrace(rel_fname=rel_fname, name=name, line=line)
+
+        visited: set[NodeId] = {node_id}
+        nodes: list[CallTraceNode] = []
+        edges: list[CallTraceEdge] = []
+        branches: list[CallTraceBranchPoint] = []
+        current = node_id
+
+        for depth in range(1, max_depth + 1):
+            confident_callees = sorted(
+                (n for n in self.graph.successors(current) if self.graph[current][n].get("confident")),
+                key=lambda n: -self.importance.get(n, 0.0),
+            )
+            if not confident_callees:
+                break
+            primary = confident_callees[0]
+            edges.append(
+                CallTraceEdge(
+                    caller_rel_fname=current[0],
+                    caller_name=current[1],
+                    caller_line=current[2],
+                    callee_rel_fname=primary[0],
+                    callee_name=primary[1],
+                    callee_line=primary[2],
+                )
+            )
+            if primary in visited:
+                break
+            visited.add(primary)
+            nodes.append(
+                CallTraceNode(
+                    rel_fname=primary[0],
+                    name=primary[1],
+                    line=primary[2],
+                    importance=self.importance.get(primary, 0.0),
+                    depth=depth,
+                )
+            )
+            alternates, omitted_count = self._cap(confident_callees[1:])
+            if alternates or omitted_count:
+                branches.append(CallTraceBranchPoint(depth=depth, alternates=alternates, omitted_count=omitted_count))
+            current = primary
+
+        return CallTrace(rel_fname=rel_fname, name=name, line=line, nodes=nodes, edges=edges, branches=branches)
 
     def _cap(self, nodes: list[NodeId]) -> tuple[list[RelatedFunction], int]:
         capped = nodes[:CALLER_CALLEE_CAP]

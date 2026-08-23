@@ -10,6 +10,8 @@ import { DirtyTracker } from './dirtyTracking';
 import { GitHookReindexManager, registerInstallGitHooksCommand } from './gitHookReindex';
 import { ExplanationHoverProvider } from './hover/functionHoverProvider';
 import { documentSelectorForSupportedLanguages } from './languages';
+import { registerShowBlastRadiusCommand } from './panel/blastRadiusCommand';
+import { registerShowCallTraceCommand } from './panel/callTraceCommand';
 import {
     EXPLANATION_PANEL_VIEW_ID,
     ExplanationPanelProvider,
@@ -205,6 +207,24 @@ export function activate(context: vscode.ExtensionContext): void {
     );
     context.subscriptions.push(
         vscode.window.onDidChangeTextEditorSelection((e) => panelProvider.onSelectionChanged(e.textEditor))
+    );
+    context.subscriptions.push(
+        registerShowBlastRadiusCommand(
+            () => indexedWorkspaceRoot,
+            () => explanationCache ?? undefined,
+            () => sidecarManager ?? undefined,
+            panelProvider,
+            output
+        )
+    );
+    context.subscriptions.push(
+        registerShowCallTraceCommand(
+            () => indexedWorkspaceRoot,
+            () => explanationCache ?? undefined,
+            () => sidecarManager ?? undefined,
+            panelProvider,
+            output
+        )
     );
 
     // CodeLens role badge + gutter icon (Session 10 / Build Order step 10) --
