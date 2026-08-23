@@ -77,15 +77,59 @@ Methods:
 The extension host is the only client and connects/reconnects at most once
 per process lifetime (a crashed sidecar is a whole new process, not a
 reconnect), so a simple accept-one-then-loop-forever server is enough here.
+
+Dispatch concurrency (Session 37): each request line is handed to a worker
+thread from a shared `ThreadPoolExecutor` (`_dispatch_worker`) instead of
+being processed inline before the next line is even read. Previously, a
+slow in-flight handler (most commonly `generate_explanation`'s Ollama call,
+up to `_TIMEOUT_SECONDS`) blocked the single read loop from consuming the
+next line at all -- an interactive request sent while a background request
+was already being processed sat unread in the socket/pipe buffer until the
+background handler returned, confirmed live by session 36's own
+measurement (+2,742ms of pure added queueing delay on top of the
+interactive request's own round trip). Reading continues immediately now,
+so a subsequent request starts its own handler (and, for `generate_explanation`
+/`generate_file_summary`, its own Ollama call) without waiting on an
+unrelated in-flight one. Responses carry the original request `id` and are
+already matched by id, not by arrival order, on the extension-host side
+(`SidecarManager.handleMessage`) -- out-of-order responses were already a
+supported case before this change, not a new requirement introduced by it.
+`RepoMap`'s mutable state (`tags_by_file`/`graph`/`importance`) is the one
+thing this concurrency makes newly unsafe -- see `sidecar/concurrency.py`
+and `RepoMap.lock`'s own comment for the readers-writer lock that protects
+it. `VectorStore` already had its own lock (session 11). Worker threads
+never touch the pipe/socket at all, though: they only push their finished
+response onto a `queue.Queue`, and `_serve_windows`/`_serve_posix`'s own
+single main thread is the only thing that ever calls `send_line`, in a
+short poll loop (`_POLL_INTERVAL_S`) that alternates draining that queue
+with a non-blocking check for new input (`PeekNamedPipe` on Windows, a
+short `recv` timeout on POSIX). An earlier version of this fix had worker
+threads call `send_line` directly under a shared lock instead -- a live
+repro against a real spawned sidecar showed that deadlocks outright on
+Windows (confirmed in isolation too): a worker thread's `WriteFile` racing
+the main thread's blocking `ReadFile` on the *same* named-pipe handle never
+returns, not occasionally, every time. The poll loop sidesteps the question
+entirely by keeping the pipe/socket touched by exactly one thread, always.
+Priority (the extension host's client-side `interactive`/`background` scheduling hint
+from sessions 32/36) still never reaches this module -- this fix is
+priority-agnostic: it works by making the dispatch loop generically
+concurrent, not by reading or acting on which caller considers itself more
+important. Whether Ollama itself can usefully run two generations
+concurrently, rather than queueing the second behind the first internally,
+is outside this module's control and was live-measured for this session's
+artifact rather than assumed.
 """
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
+import queue
 import socket
 import sys
 import threading
+import time
 from dataclasses import asdict
 from typing import Any
 
@@ -116,21 +160,22 @@ def _handle_status(_repo_map: RepoMap, _params: dict[str, Any]) -> dict[str, Any
 
 def _handle_index_file(repo_map: RepoMap, params: dict[str, Any]) -> dict[str, Any]:
     rel_fname = params["file_path"]
-    defs = [tag for tag in repo_map.tags_by_file.get(rel_fname, []) if tag.kind == "def"]
+    with repo_map.lock.read_lock():
+        defs = [tag for tag in repo_map.tags_by_file.get(rel_fname, []) if tag.kind == "def"]
 
-    functions = []
-    for tag in defs:
-        ctx = repo_map.get_function_context(rel_fname, tag.name, tag.start_line)
-        functions.append(
-            {
-                "name": ctx.name,
-                "line": ctx.line,
-                "callers": [asdict(c) for c in ctx.callers],
-                "callers_omitted": ctx.callers_omitted,
-                "callees": [asdict(c) for c in ctx.callees],
-                "callees_omitted": ctx.callees_omitted,
-            }
-        )
+        functions = []
+        for tag in defs:
+            ctx = repo_map.get_function_context(rel_fname, tag.name, tag.start_line)
+            functions.append(
+                {
+                    "name": ctx.name,
+                    "line": ctx.line,
+                    "callers": [asdict(c) for c in ctx.callers],
+                    "callers_omitted": ctx.callers_omitted,
+                    "callees": [asdict(c) for c in ctx.callees],
+                    "callees_omitted": ctx.callees_omitted,
+                }
+            )
     return {"file_path": rel_fname, "functions": functions}
 
 
@@ -187,16 +232,18 @@ def _handle_generate_explanation(repo_map: RepoMap, params: dict[str, Any]) -> d
     fn_source = params["fn_source"]
     model_id = params["model_id"]
 
-    tag = _find_def_tag(repo_map, rel_fname, name, line)
-    if tag is not None:
-        ctx = repo_map.get_function_context(rel_fname, tag.name, tag.start_line)
-        span_start, span_end = tag.start_line, tag.end_line
-    else:
-        # Not resolvable in the ranked graph (e.g. a def shape the tree-sitter
-        # query doesn't capture) -- degrade to an empty context rather than
-        # erroring the whole hover; still proves the plumbing end-to-end.
-        ctx = FunctionContext(rel_fname, name, line)
-        span_start, span_end = line, line + 1
+    with repo_map.lock.read_lock():
+        tag = _find_def_tag(repo_map, rel_fname, name, line)
+        if tag is not None:
+            ctx = repo_map.get_function_context(rel_fname, tag.name, tag.start_line)
+            span_start, span_end = tag.start_line, tag.end_line
+        else:
+            # Not resolvable in the ranked graph (e.g. a def shape the
+            # tree-sitter query doesn't capture) -- degrade to an empty
+            # context rather than erroring the whole hover; still proves the
+            # plumbing end-to-end.
+            ctx = FunctionContext(rel_fname, name, line)
+            span_start, span_end = line, line + 1
 
     retrieved_chunks = _query_retrieved_chunks(repo_map, fn_source, rel_fname, span_start, span_end)
     context_hash = compute_context_hash(ctx, retrieved_chunks)
@@ -220,7 +267,8 @@ def _handle_generate_explanation(repo_map: RepoMap, params: dict[str, Any]) -> d
 
 def _handle_reindex_file(repo_map: RepoMap, params: dict[str, Any]) -> dict[str, Any]:
     rel_fname = params["file_path"]
-    functions_indexed = repo_map.reindex_file(rel_fname)
+    with repo_map.lock.write_lock():
+        functions_indexed = repo_map.reindex_file(rel_fname)
 
     vector_store: VectorStore | None = getattr(repo_map, "vector_store", None)
     embedding_model_id: str | None = getattr(repo_map, "embedding_model_id", None)
@@ -236,37 +284,40 @@ def _handle_reindex_file(repo_map: RepoMap, params: dict[str, Any]) -> dict[str,
 
 def _handle_resolve_function(repo_map: RepoMap, params: dict[str, Any]) -> dict[str, Any]:
     name = params["name"]
-    candidates = [
-        tag
-        for tags in repo_map.tags_by_file.values()
-        for tag in tags
-        if tag.kind == "def" and tag.name == name
-    ]
-    if not candidates:
-        return {"found": False}
+    with repo_map.lock.read_lock():
+        candidates = [
+            tag
+            for tags in repo_map.tags_by_file.values()
+            for tag in tags
+            if tag.kind == "def" and tag.name == name
+        ]
+        if not candidates:
+            return {"found": False}
 
-    # Ambiguous names (the same name defined in more than one file) resolve
-    # to the highest-PageRank-importance candidate -- same ranking already
-    # used everywhere else in the codebase, and a reasonable tie-break for
-    # "which one did the user probably mean" without building a real
-    # disambiguation UI (out of scope for v0, same as _find_def_tag's
-    # nearest-line matching in generate_explanation above).
-    def _importance(tag) -> float:
-        return repo_map.importance.get((tag.rel_fname, tag.name, tag.start_line), 0.0)
+        # Ambiguous names (the same name defined in more than one file)
+        # resolve to the highest-PageRank-importance candidate -- same
+        # ranking already used everywhere else in the codebase, and a
+        # reasonable tie-break for "which one did the user probably mean"
+        # without building a real disambiguation UI (out of scope for v0,
+        # same as _find_def_tag's nearest-line matching in
+        # generate_explanation above).
+        def _importance(tag) -> float:
+            return repo_map.importance.get((tag.rel_fname, tag.name, tag.start_line), 0.0)
 
-    best = max(candidates, key=_importance)
-    return {"found": True, "rel_fname": best.rel_fname, "line": best.start_line}
+        best = max(candidates, key=_importance)
+        return {"found": True, "rel_fname": best.rel_fname, "line": best.start_line}
 
 
 def _handle_list_ranked_functions(repo_map: RepoMap, _params: dict[str, Any]) -> dict[str, Any]:
     def _importance(node) -> float:
         return repo_map.importance.get(node, 0.0)
 
-    ranked = sorted(repo_map.list_functions(), key=_importance, reverse=True)
-    functions = [
-        {"rel_fname": rel_fname, "name": name, "line": line, "importance": _importance((rel_fname, name, line))}
-        for rel_fname, name, line in ranked
-    ]
+    with repo_map.lock.read_lock():
+        ranked = sorted(repo_map.list_functions(), key=_importance, reverse=True)
+        functions = [
+            {"rel_fname": rel_fname, "name": name, "line": line, "importance": _importance((rel_fname, name, line))}
+            for rel_fname, name, line in ranked
+        ]
     return {"functions": functions}
 
 
@@ -320,7 +371,67 @@ def _dispatch(repo_map: RepoMap, message: dict[str, Any]) -> dict[str, Any]:
     return {"id": req_id, "result": result}
 
 
-def _process_lines(buf: bytes, repo_map: RepoMap, send_line) -> bytes:
+# Generous cap, not a tuned tuning knob: the real limiting factor on how
+# much this actually parallelizes is Ollama's own concurrency (or lack of
+# it), which this module has no control over -- see the module docstring's
+# "Dispatch concurrency" section. 8 comfortably covers this process's real
+# concurrent-request ceiling (one interactive request plus a small number
+# of autonomous background loops, per Core Rule 11's callers) with room to
+# spare, without spawning threads without bound.
+_MAX_WORKERS = 8
+
+# How often the single I/O-owning thread (see `_serve_windows`/`_serve_posix`)
+# checks for newly-arrived input and drains any responses workers have
+# finished computing, when neither is already available. This -- not thread
+# count -- is what bounds how quickly a new request gets read once dispatch
+# is no longer synchronous: worst case ~this many ms, a rounding error next
+# to the multi-second Ollama calls this whole session is about, and utterly
+# negligible next to session 36's own +2,742ms measurement of the bug this
+# fixes.
+_POLL_INTERVAL_S = 0.02
+
+
+def _dispatch_worker(repo_map: RepoMap, message: dict[str, Any], out_queue: "queue.Queue[Any]") -> None:
+    # Deliberately does not touch the pipe/socket at all -- only the single
+    # I/O thread in `_serve_windows`/`_serve_posix` does. See those
+    # functions' own comments for why: a live repro against a real spawned
+    # sidecar showed that a worker thread calling `WriteFile` while the main
+    # thread was blocked in `ReadFile` on the *same* named-pipe handle
+    # deadlocks the whole connection outright (confirmed in isolation too,
+    # independent of anything else this session changed) -- not a race that
+    # occasionally corrupts a response, a hang, every time. Sockets were not
+    # separately confirmed broken the same way, but the same single-I/O-
+    # thread design sidesteps the question for both transports at once
+    # rather than trusting an unconfirmed asymmetry between them.
+    response = _dispatch(repo_map, message)
+    out_queue.put(json.dumps(response))
+
+
+def _drain_outgoing(send_line, out_queue: "queue.Queue[Any]") -> None:
+    """Writes every response currently sitting in the queue, in the order
+    workers finished them -- not necessarily request order; see the module
+    docstring's "Dispatch concurrency" section on why that's already fine."""
+    while True:
+        try:
+            item = out_queue.get_nowait()
+        except queue.Empty:
+            return
+        try:
+            send_line(item)
+        except Exception as exc:
+            # The connection may already be gone (client disconnected mid-
+            # flight). Must not crash the I/O loop -- the read side's own
+            # exception handling / EOF check already covers a genuinely
+            # dead connection on its next pass through this same loop.
+            _log(f"failed to send response: {exc}")
+
+
+def _process_lines(
+    buf: bytes,
+    repo_map: RepoMap,
+    out_queue: "queue.Queue[Any]",
+    executor: concurrent.futures.ThreadPoolExecutor,
+) -> bytes:
     while b"\n" in buf:
         line, buf = buf.split(b"\n", 1)
         if not line.strip():
@@ -328,14 +439,18 @@ def _process_lines(buf: bytes, repo_map: RepoMap, send_line) -> bytes:
         try:
             message = json.loads(line.decode("utf-8"))
         except json.JSONDecodeError as exc:
-            send_line(json.dumps({"id": None, "error": {"message": f"invalid JSON: {exc}"}}))
+            out_queue.put(json.dumps({"id": None, "error": {"message": f"invalid JSON: {exc}"}}))
             continue
-        response = _dispatch(repo_map, message)
-        send_line(json.dumps(response))
+        # Session 37: submit and keep reading, rather than calling
+        # `_dispatch` inline here -- see the module docstring's "Dispatch
+        # concurrency" section for why this is the actual fix, not just a
+        # refactor.
+        executor.submit(_dispatch_worker, repo_map, message, out_queue)
     return buf
 
 
 def _serve_windows(address: str, repo_map: RepoMap) -> None:
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=_MAX_WORKERS, thread_name_prefix="rpc-worker")
     while True:
         pipe = win32pipe.CreateNamedPipe(
             address,
@@ -351,19 +466,44 @@ def _serve_windows(address: str, repo_map: RepoMap) -> None:
         win32pipe.ConnectNamedPipe(pipe, None)
         _log("client connected")
 
-        def send_line(text: str) -> None:
-            win32file.WriteFile(pipe, text.encode("utf-8") + b"\n")
+        # A plain closure over `pipe`, safe here even though `pipe` is
+        # reassigned each outer-loop iteration: `send_line` is only ever
+        # called by this same thread, within this same iteration (via
+        # `_drain_outgoing` below), always before `pipe` could be
+        # reassigned. No other thread calls it -- see `_dispatch_worker`'s
+        # comment for why that invariant matters.
+        def send_line(text: str, _pipe=pipe) -> None:
+            win32file.WriteFile(_pipe, text.encode("utf-8") + b"\n")
+
+        out_queue: "queue.Queue[Any]" = queue.Queue()
 
         buf = b""
         try:
             while True:
+                # Session 37: this is the whole fix, in one loop. Dispatch
+                # (potentially several seconds of Ollama I/O, on a worker
+                # thread via `_process_lines`/`_dispatch_worker` above) no
+                # longer blocks this thread from noticing a newly-arrived
+                # request -- `PeekNamedPipe` lets it check for input without
+                # committing to a blocking `ReadFile` that could otherwise
+                # sit for up to the full request timeout. This thread is
+                # also the *only* one that ever calls `WriteFile`/`ReadFile`
+                # on `pipe` -- see `_dispatch_worker`'s comment for why that
+                # matters (not just tidiness): a worker thread writing
+                # concurrently with this thread's read deadlocks the pipe.
+                _drain_outgoing(send_line, out_queue)
+                _, bytes_avail, _ = win32pipe.PeekNamedPipe(pipe, 0)
+                if bytes_avail == 0:
+                    time.sleep(_POLL_INTERVAL_S)
+                    continue
                 hr, data = win32file.ReadFile(pipe, 65536)
                 if not data:
                     break
-                buf = _process_lines(buf + data, repo_map, send_line)
+                buf = _process_lines(buf + data, repo_map, out_queue, executor)
         except pywintypes.error as exc:
             _log(f"client disconnected ({exc.strerror})")
         finally:
+            _drain_outgoing(send_line, out_queue)
             win32file.CloseHandle(pipe)
 
 
@@ -376,22 +516,37 @@ def _serve_posix(address: str, repo_map: RepoMap) -> None:
     server.listen(1)
     _log(f"listening on {address}")
 
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=_MAX_WORKERS, thread_name_prefix="rpc-worker")
     try:
         while True:
             conn, _ = server.accept()
             _log("client connected")
+            # Short recv timeout, not a real deadline: lets this thread fall
+            # through to drain outgoing responses and re-check even when no
+            # new request has arrived yet -- same role `PeekNamedPipe` plays
+            # in `_serve_windows` above, POSIX's more natural equivalent.
+            conn.settimeout(_POLL_INTERVAL_S)
 
-            def send_line(text: str) -> None:
-                conn.sendall(text.encode("utf-8") + b"\n")
+            # Same reasoning as `_serve_windows`'s own `send_line` -- see its
+            # comment.
+            def send_line(text: str, _conn=conn) -> None:
+                _conn.sendall(text.encode("utf-8") + b"\n")
+
+            out_queue: "queue.Queue[Any]" = queue.Queue()
 
             buf = b""
             try:
                 while True:
-                    data = conn.recv(65536)
+                    _drain_outgoing(send_line, out_queue)
+                    try:
+                        data = conn.recv(65536)
+                    except socket.timeout:
+                        continue
                     if not data:
                         break
-                    buf = _process_lines(buf + data, repo_map, send_line)
+                    buf = _process_lines(buf + data, repo_map, out_queue, executor)
             finally:
+                _drain_outgoing(send_line, out_queue)
                 conn.close()
                 _log("client disconnected")
     finally:

@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
+from ..concurrency import RWLock
 from .extraction import extract_tags, extract_tags_for_repo
 from .graph import NodeId, build_call_graph
 from .rank import compute_importance
@@ -47,6 +48,12 @@ class RepoMap:
         self.tags_by_file: dict[str, list] = {}
         self.graph = None
         self.importance: dict[NodeId, float] = {}
+        # Guards concurrent access to the three mutable attributes above --
+        # see sidecar/concurrency.py's module docstring (session 37). Held
+        # by callers (rpc_server.py's handlers), not by this class's own
+        # methods, since some callers read tags_by_file/importance directly
+        # rather than only through get_function_context/list_functions.
+        self.lock = RWLock()
 
     def index(self) -> None:
         self.tags_by_file = extract_tags_for_repo(self.root)

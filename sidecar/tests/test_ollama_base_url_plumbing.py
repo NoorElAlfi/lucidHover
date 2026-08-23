@@ -13,19 +13,23 @@ test_rpc_server.py's existing repo_map fixture.
 from __future__ import annotations
 
 from sidecar import rpc_server
+from sidecar.concurrency import RWLock
 from sidecar.generation.ollama_client import OLLAMA_BASE_URL
 from sidecar.repomap.context import RepoMap
 
 
 class _StubRepoMap:
     """Minimal stand-in -- only the attributes `_handle_generate_explanation`
-    and `_query_retrieved_chunks` actually read."""
+    and `_query_retrieved_chunks` actually read. `lock` (session 37) is a
+    real RWLock, not a stub, since `_handle_generate_explanation` now
+    acquires it for real around its repo_map read."""
 
     def __init__(self, ollama_base_url: str | None):
         self.ollama_base_url = ollama_base_url
         self.tags_by_file: dict = {}
         self.vector_store = None
         self.embedding_model_id = None
+        self.lock = RWLock()
 
     def get_function_context(self, rel_fname, name, line):
         from sidecar.repomap.context import FunctionContext
