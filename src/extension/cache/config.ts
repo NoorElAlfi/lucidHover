@@ -64,6 +64,24 @@ export function resolveOllamaEndpoint(): ResolvedOllamaEndpoint {
 }
 
 /**
+ * Session 39 (cache eviction policy): default true -- the "automatic
+ * narrow" policy the user chose. Every write through `generateAndCache`/
+ * `summaryDocGenerator` resolves this fresh (same pattern as
+ * `resolveModelId`) and passes it to `ExplanationCache.write()`'s
+ * `evictSuperseded` param, so toggling this in settings takes effect on the
+ * very next write, no restart needed. Set to false to fall back to manual
+ * cleanup only, via the "LucidHover: Purge Superseded Cache Rows" command
+ * (`ExplanationCache.purgeSupersededRows()`) -- both the automatic path and
+ * the manual command apply the identical narrow definition (same fn_id +
+ * model_id + embedding_model_id + prompt_version tuple only), so this
+ * setting controls *when* superseded rows get cleaned up, not *which* rows
+ * count as superseded.
+ */
+export function resolveAutoEvictSupersededCache(): boolean {
+    return vscode.workspace.getConfiguration('lucidHover').get<boolean>('autoEvictSupersededCache') ?? true;
+}
+
+/**
  * `all-minilm`: Session 11 (Build Order step 11) flips this from the fixed
  * `'none'` it held since Session 5 to a real Ollama embedding model -- the
  * same local backend `MODEL_ID`'s generation calls already use (Ollama's

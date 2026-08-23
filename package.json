@@ -66,6 +66,10 @@
       {
         "command": "lucidhover.generateSummaryDocs",
         "title": "LucidHover: Generate Summary Docs"
+      },
+      {
+        "command": "lucidhover.purgeSupersededCache",
+        "title": "LucidHover: Purge Superseded Cache Rows"
       }
     ],
     "configuration": {
@@ -86,6 +90,11 @@
           "type": "string",
           "default": "",
           "description": "Local Ollama endpoint to use instead of the bundled http://localhost:11434, e.g. to point at a custom local model. Must be a local address (localhost/127.0.0.1/::1) -- LucidHover is fully local and will reject and ignore any other host, including cloud-hosted Ollama endpoints. Leave empty to use the default. This is spawn-time config: run \"LucidHover: Restart Sidecar\" (or reload the window) after changing it."
+        },
+        "lucidHover.autoEvictSupersededCache": {
+          "type": "boolean",
+          "default": true,
+          "description": "When a function's explanation is regenerated (a genuine content change), automatically delete its old cache row. Only ever removes a row already superseded by a fresher one for the exact same function/model/embedding/prompt combination -- it never touches rows left behind by a model or prompt-version change. Turn this off to manage cleanup manually instead, via \"LucidHover: Purge Superseded Cache Rows\"."
         }
       }
     }

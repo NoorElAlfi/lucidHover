@@ -16,6 +16,7 @@ import {
     registerNavigateToFunctionCommand,
     registerShowMoreCommand,
 } from './panel/explanationPanelProvider';
+import { registerPurgeSupersededCacheCommand } from './purgeSupersededCacheCommand';
 import { registerRefreshExplanationCommand } from './refreshExplanationCommand';
 import { SaveReindexManager } from './saveReindex';
 import { SidecarManager } from './sidecar/sidecarManager';
@@ -183,6 +184,7 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.window.registerWebviewViewProvider(EXPLANATION_PANEL_VIEW_ID, panelProvider)
     );
     context.subscriptions.push(registerShowMoreCommand(panelProvider, () => explanationCache ?? undefined));
+    context.subscriptions.push(registerPurgeSupersededCacheCommand(() => explanationCache ?? undefined));
     context.subscriptions.push(
         registerNavigateToFunctionCommand(
             () => indexedWorkspaceRoot,

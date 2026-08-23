@@ -1,6 +1,6 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { EMBEDDING_MODEL_ID, PROMPT_VERSION, SUMMARY_DOC_PROMPT_VERSION, resolveModelId } from './cache/config';
+import { EMBEDDING_MODEL_ID, PROMPT_VERSION, SUMMARY_DOC_PROMPT_VERSION, resolveAutoEvictSupersededCache, resolveModelId } from './cache/config';
 import { CacheRow, ExplanationCache } from './cache/explanationCache';
 import { computeCacheKey, computeFileSummaryFnHash, computeFnId } from './cache/hash';
 import { ResolvedFunction, resolveFunctionsInFile } from './functionResolution';
@@ -298,7 +298,7 @@ async function resolveFileSummaryParagraph(
             context_tier: 'summary-doc',
             generated_at: new Date().toISOString(),
         };
-        cache.write(row);
+        cache.write(row, resolveAutoEvictSupersededCache());
         return { text: result.summary, failed: false };
     } catch (err) {
         output.appendLine(`summary-docs: generate_file_summary failed for ${relFile}: ${String(err)}`);
