@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { resolveFunctionsInFile, ResolvedFunction } from './functionResolution';
-import { SidecarManager } from './sidecar/sidecarManager';
+import { RequestPriority, SidecarManager } from './sidecar/sidecarManager';
 
 /**
  * `stale` half of Session 13's freshness badge -- the counterpart to
@@ -116,6 +116,15 @@ function closestResolved(
  * already. This is the "side effect of a trigger that already contacts the
  * sidecar" the session brief requires (Core Rule 4): staleness is never
  * computed from the hover/panel render path.
+ *
+ * `priority` (Session 36) defaults to `'interactive'`, matching every
+ * caller before this session (save-reindex, a direct user action). The two
+ * autonomous background callers (`BackgroundFlushManager`,
+ * `GitHookReindexManager`) pass `'background'` and gate their own call to
+ * this function on `sidecar.waitForInteractiveIdle()` first -- same
+ * division of responsibility as `generateAndCache`'s own `priority` param
+ * (session 32): the caller decides whether to wait, this just forwards the
+ * label through to the RPC so it's visible to `hasInteractivePending()`.
  */
 export async function flagStaleDependents(
     sidecar: SidecarManager,
@@ -123,7 +132,8 @@ export async function flagStaleDependents(
     relFile: string,
     changedFunctions: readonly ResolvedFunction[],
     staleTracker: StaleTracker,
-    output: vscode.OutputChannel
+    output: vscode.OutputChannel,
+    priority: RequestPriority = 'interactive'
 ): Promise<void> {
     if (changedFunctions.length === 0) {
         return;
@@ -131,7 +141,7 @@ export async function flagStaleDependents(
 
     let result: IndexFileResult;
     try {
-        result = await sidecar.request<IndexFileResult>('index_file', { file_path: relFile });
+        result = await sidecar.request<IndexFileResult>('index_file', { file_path: relFile }, undefined, priority);
     } catch (err) {
         output.appendLine(`staleness: index_file failed for ${relFile}, dependents not flagged: ${String(err)}`);
         return;

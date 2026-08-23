@@ -183,8 +183,20 @@ export class GitHookReindexManager implements vscode.Disposable {
                 if (token.isCancellationRequested) {
                     break;
                 }
+
+                // Session 36: this pass is driven by an external git hook's
+                // marker-file write, not a direct in-editor user action --
+                // same autonomous-background shape as BackgroundIndexManager
+                // (session 32) and BackgroundFlushManager (this session);
+                // defer to any pending/imminent interactive request before
+                // sending each of its own RPCs.
+                await sidecar.waitForInteractiveIdle(token);
+                if (token.isCancellationRequested) {
+                    break;
+                }
+
                 try {
-                    await sidecar.request('reindex_file', { file_path: relFile }, REINDEX_TIMEOUT_MS);
+                    await sidecar.request('reindex_file', { file_path: relFile }, REINDEX_TIMEOUT_MS, 'background');
                 } catch (err) {
                     this.output.appendLine(`git-hook: reindex_file failed for ${relFile}: ${String(err)}`);
                     continue;
@@ -215,8 +227,15 @@ export class GitHookReindexManager implements vscode.Disposable {
                         promptVersion: PROMPT_VERSION,
                     });
 
+                    // Session 36: same gate as above, immediately before the
+                    // actual generate_explanation send.
+                    await sidecar.waitForInteractiveIdle(token);
+                    if (token.isCancellationRequested) {
+                        break;
+                    }
+
                     try {
-                        const row = await generateAndCache(sidecar, cache, fn);
+                        const row = await generateAndCache(sidecar, cache, fn, 'background');
                         regenerated++;
                         regeneratedThisPass.push({ relFile, fnId: fn.fnId });
                         if (priorRow && priorRow.fn_hash !== row.fn_hash) {
@@ -229,7 +248,18 @@ export class GitHookReindexManager implements vscode.Disposable {
                 }
 
                 if (staleTracker && changedFunctions.length > 0) {
-                    await flagStaleDependents(sidecar, workspaceRoot, relFile, changedFunctions, staleTracker, this.output);
+                    await sidecar.waitForInteractiveIdle(token);
+                    if (!token.isCancellationRequested) {
+                        await flagStaleDependents(
+                            sidecar,
+                            workspaceRoot,
+                            relFile,
+                            changedFunctions,
+                            staleTracker,
+                            this.output,
+                            'background'
+                        );
+                    }
                 }
             }
 

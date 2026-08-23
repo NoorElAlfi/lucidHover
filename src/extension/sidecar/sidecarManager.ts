@@ -331,17 +331,29 @@ export class SidecarManager implements vscode.Disposable {
      * Resolves once no interactive-priority request is pending, after a
      * short settle window (see `INTERACTIVE_GRACE_MS`) confirms nothing new
      * arrived in the meantime. Intended for a background caller to await
-     * immediately before sending each of its own requests -- see
-     * `BackgroundIndexManager`'s pre-generation loop. Local, in-memory
-     * bookkeeping only; never issues an RPC of its own (Core Rule 11's
-     * "don't add a polling loop" is about sidecar traffic, not this).
+     * immediately before sending each of its own requests -- every
+     * autonomous background loop (`BackgroundIndexManager`, and, as of
+     * Session 36, `BackgroundFlushManager`/`GitHookReindexManager`) awaits
+     * this before each RPC it sends. Local, in-memory bookkeeping only;
+     * never issues an RPC of its own (Core Rule 11's "don't add a polling
+     * loop" is about sidecar traffic, not this).
+     *
+     * `token` (Session 36) is optional and, if given, lets this resolve
+     * early on cancellation instead of potentially parking for an extended,
+     * unbounded stretch under a steady stream of interactive activity --
+     * the exact "Cancel Background Indexing" responsiveness bug
+     * `BackgroundIndexManager`'s own `raceAgainstCancellation` wrapper
+     * fixed in Session 32. Consolidated here, rather than duplicated as a
+     * wrapper in every background caller, since a second and third caller
+     * (`BackgroundFlushManager`/`GitHookReindexManager`) now need the
+     * identical behavior.
      */
-    async waitForInteractiveIdle(): Promise<void> {
-        while (!this.disposed) {
-            while (this.hasInteractivePending() && !this.disposed) {
-                await this.nextIdleSignal();
+    async waitForInteractiveIdle(token?: vscode.CancellationToken): Promise<void> {
+        while (!this.disposed && !token?.isCancellationRequested) {
+            while (this.hasInteractivePending() && !this.disposed && !token?.isCancellationRequested) {
+                await this.raceWithCancellation(this.nextIdleSignal(), token);
             }
-            if (this.disposed) {
+            if (this.disposed || token?.isCancellationRequested) {
                 return;
             }
             // A fresh, independent timer -- deliberately not the `sleep()`
@@ -354,13 +366,43 @@ export class SidecarManager implements vscode.Disposable {
             // whichever one calls `sleep()` second silently steal the
             // other's timer out from under `cancelPendingRetry()` (found by
             // code-reviewer during this session).
-            await new Promise<void>((resolve) => setTimeout(resolve, INTERACTIVE_GRACE_MS));
+            await this.raceWithCancellation(
+                new Promise<void>((resolve) => setTimeout(resolve, INTERACTIVE_GRACE_MS)),
+                token
+            );
+            if (token?.isCancellationRequested) {
+                return;
+            }
             if (!this.hasInteractivePending()) {
                 return;
             }
             // Something interactive arrived during the settle window -- loop
             // around and wait it out too.
         }
+    }
+
+    /** Resolves early if `token` fires, without canceling `awaited` itself
+     * (it has no cancel handle) -- just stops waiting on it further. Same
+     * shape as `BackgroundIndexManager`'s pre-Session-36
+     * `raceAgainstCancellation` helper, moved here so every background
+     * caller of `waitForInteractiveIdle` gets it for free. */
+    private raceWithCancellation(awaited: Promise<void>, token?: vscode.CancellationToken): Promise<void> {
+        if (!token) {
+            return awaited;
+        }
+        return new Promise<void>((resolve) => {
+            let settled = false;
+            const finish = () => {
+                if (settled) {
+                    return;
+                }
+                settled = true;
+                subscription.dispose();
+                resolve();
+            };
+            const subscription = token.onCancellationRequested(finish);
+            void awaited.then(finish);
+        });
     }
 
     private hasInteractivePending(): boolean {
@@ -468,7 +510,14 @@ export class SidecarManager implements vscode.Disposable {
             return;
         }
         try {
-            await this.request('status', {});
+            // Session 36: 'background' priority -- this ping is autonomous
+            // housekeeping (fired by this class's own timer, never a direct
+            // user action), so it shouldn't register as "interactive" and
+            // make a real background loop's `waitForInteractiveIdle()` wait
+            // on it needlessly (found by this session's own RPC-call-site
+            // audit; the skip above when `pendingRequests.size > 0` already
+            // keeps this rare in practice, but the mislabeling was real).
+            await this.request('status', {}, REQUEST_TIMEOUT_MS, 'background');
             this.consecutiveFailures = 0;
         } catch (err) {
             this.consecutiveFailures++;
