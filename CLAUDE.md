@@ -49,10 +49,19 @@ the relevant section, and the most recent artifact in `.claude/sessions/` carrie
     decision — per-language versioning was considered and rejected. Say in the artifact what the
     version went from and to (precedent: session 19, `few-shot-v3` → `few-shot-v4`) and note that a
     bump means a full re-index.
-11. **The sidecar's RPC dispatch loop is strictly one request at a time.** Anything that adds a new
-    RPC — background work, status polling, a new feature's lookup — competes with interactive hover,
-    save, and refresh requests. Piggyback on the existing heartbeat rather than adding a polling
-    loop, and keep background work throttled the way background indexing already is.
+11. **The sidecar's RPC dispatch loop dispatches requests concurrently, not strictly one at a time
+    (Session 37).** Each request line is handed to its own worker thread; only one dedicated
+    per-connection I/O thread ever touches the pipe/socket itself — a worker calling
+    `WriteFile`/`send` directly, even under a lock, deadlocked the connection outright in live
+    testing, so workers only ever hand a finished response back through a queue. `RepoMap`'s mutable
+    state (`tags_by_file`/`graph`/`importance`) is guarded by a readers-writer lock (`RepoMap.lock`,
+    `sidecar/concurrency.py`); `VectorStore` already had its own (session 11). This narrows, but does
+    not eliminate, the interactive-vs-background gap: Ollama's own concurrency (or lack of it) still
+    gates real throughput, and multiple autonomous background loops can now genuinely race each
+    other, not just against interactive traffic (not fixed, not confirmed costly — session 37's own
+    artifact). Anything that adds a new RPC still competes for that same real resource — piggyback on
+    the existing heartbeat rather than adding a polling loop, and keep background work throttled and
+    client-side-priority-gated (sessions 32/36) the way background indexing already is.
 12. **Language support is declared once, in the language manifest.** Language-specific data
     (extensions, grammar, query file, exclusion patterns, resolution strategy) lives in
     `languages.json` and per-language query files. Language-specific logic lives only in sidecar
@@ -163,6 +172,7 @@ value, not a placeholder to be renamed later.
 | 34 | Small fixes bundle — five independent carried-forward loose ends: `roleCodeLensAutoRefresh.test.ts`'s cross-provider test-isolation bug (diagnosed and fixed, not just a flake), a `refreshEditor` per-editor version guard against overlapping redraws, a `SidecarManager.log()` disposed guard, a `double`/`makeCounter` arrow-const regression test, and two stale-doc syncs (Core Rule 12 amendment + fixtures directory tree) | fix | Core | complete | [session-34-small-fixes-bundle.md](.claude/sessions/session-34-small-fixes-bundle.md) |
 | 35 | Disposal-order confirmation + stale doc pointer fix — session 34's two carried-forward items: confirmed (against VS Code's real extension-host source) that the hypothesized output-channel-disposed-before-`SidecarManager` race can't occur, since `extension.ts`'s own `deactivate()` runs before VS Code ever disposes `context.subscriptions`; and fixed CLAUDE.md's stale `docs/planning/current-state.md` pointer to the file's real location, `lucidhover-current-state.md` | fix | Core | complete | [session-35-disposal-race-and-doc-pointer-fix.md](.claude/sessions/session-35-disposal-race-and-doc-pointer-fix.md) |
 | 36 | Sidecar RPC dispatch-loop redesign, part 1 — extended session 32's client-side priority gate to `BackgroundFlushManager`/`GitHookReindexManager` (previously ungated) plus two gaps a fresh RPC-call-site audit found (`heartbeatTick`'s `status` ping and `BackgroundIndexManager`'s own `list_ranked_functions` call, both mislabeled `'interactive'`); consolidated the cancellation-race helper into `SidecarManager.waitForInteractiveIdle(token?)` itself rather than duplicating it per caller; confirmed live against real pokerogue that the gate now generically holds a second background request until ~300ms after interactive work clears, but also reconfirmed the architectural "already in-flight" collision floor is unchanged and unfixable client-side — part 2 (a dispatch-loop-level fix) scoped as its own follow-up, not attempted | fix | Core | partial | [session-36-sidecar-dispatch-loop-redesign.md](.claude/sessions/session-36-sidecar-dispatch-loop-redesign.md) |
+| 37 | Sidecar RPC dispatch-loop redesign, part 2 — closed session 36's "already in-flight" collision floor inside `sidecar/rpc_server.py` itself: each request now dispatches onto its own worker thread (`ThreadPoolExecutor`) instead of processing inline before the next line is read, with a new `sidecar/concurrency.py` readers-writer lock protecting `RepoMap`'s now-concurrently-accessed mutable state; a first design (workers writing their own responses under a shared lock) deadlocked the named pipe outright in live testing, so the shipped design routes all socket/pipe I/O through a single per-connection thread via a 20ms poll loop, with workers only ever pushing finished responses onto a queue — confirmed live against real pokerogue + real Ollama that added interactive latency when a background request is already in flight dropped to +227ms, under session 36's own pre-defined <1s acceptance bar; `code-reviewer`/`test-runner` subagents both failed on an account spend-limit error, substituted with direct manual verification (113/113 Python, 45/45 TS unit, 22/22 TS integration including two real-sidecar-plus-real-Ollama tests, tsc clean) | fix | Core | complete | [session-37-dispatch-loop-concurrency-fix.md](.claude/sessions/session-37-dispatch-loop-concurrency-fix.md) |
 
 ## File ownership (avoid overlapping edits across parallel work)
 
