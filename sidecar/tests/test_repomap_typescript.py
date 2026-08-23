@@ -17,6 +17,7 @@ import shutil
 import pytest
 
 from sidecar.repomap.context import RepoMap
+from sidecar.repomap.graph import build_call_graph
 from sidecar.tests.fixture_paths import fixture_repomap_root
 
 FIXTURE_ROOT = fixture_repomap_root("typescript")
@@ -120,3 +121,13 @@ def test_reindex_file_leaves_line_shifted_functions_call_graph_intact(scratch_re
     ctx = rm.get_function_context(*handle_signup_route)
     callee_names = {c.name for c in ctx.callees}
     assert callee_names == {"logEvent", "validateAndPersistSignup"}
+
+    # Session 38: every def in handlers.ts shifted node id (line number is
+    # part of `NodeId`) -- exactly the case `update_call_graph_for_file`'s
+    # full local reset-and-recompute (not a diff-by-name patch) needs to get
+    # right without touching any other file.
+    fresh = build_call_graph(rm.tags_by_file)
+    assert set(rm.graph.nodes) == set(fresh.nodes)
+    actual_edges = {(u, v): rm.graph[u][v]["weight"] for u, v in rm.graph.edges}
+    fresh_edges = {(u, v): fresh[u][v]["weight"] for u, v in fresh.edges}
+    assert actual_edges == fresh_edges

@@ -14,8 +14,8 @@ import os
 from dataclasses import dataclass, field
 
 from ..concurrency import RWLock
-from .extraction import extract_tags, extract_tags_for_repo
-from .graph import NodeId, build_call_graph
+from .extraction import Tag, extract_tags, extract_tags_for_repo
+from .graph import NodeId, build_call_graph, build_indices, update_call_graph_for_file
 from .rank import compute_importance
 
 CALLER_CALLEE_CAP = 15
@@ -48,9 +48,17 @@ class RepoMap:
         self.tags_by_file: dict[str, list] = {}
         self.graph = None
         self.importance: dict[NodeId, float] = {}
-        # Guards concurrent access to the three mutable attributes above --
-        # see sidecar/concurrency.py's module docstring (session 37). Held
-        # by callers (rpc_server.py's handlers), not by this class's own
+        # Reverse indices (name -> defs/refs, file -> defs) that `index()`
+        # populates in full and `reindex_file()` maintains incrementally
+        # (session 38) -- see graph.py::update_call_graph_for_file's
+        # docstring for why these make a single-file reindex not need to
+        # re-scan the rest of the repo.
+        self.defs_by_name: dict[str, list[Tag]] = {}
+        self.defs_by_file: dict[str, list[Tag]] = {}
+        self.refs_by_name: dict[str, list[Tag]] = {}
+        # Guards concurrent access to the mutable attributes above -- see
+        # sidecar/concurrency.py's module docstring (session 37). Held by
+        # callers (rpc_server.py's handlers), not by this class's own
         # methods, since some callers read tags_by_file/importance directly
         # rather than only through get_function_context/list_functions.
         self.lock = RWLock()
@@ -58,28 +66,63 @@ class RepoMap:
     def index(self) -> None:
         self.tags_by_file = extract_tags_for_repo(self.root)
         self.graph = build_call_graph(self.tags_by_file)
+        self.defs_by_name, self.defs_by_file, self.refs_by_name = build_indices(self.tags_by_file)
         self.importance = compute_importance(self.graph)
 
     def reindex_file(self, rel_fname: str) -> int:
         """
-        Re-parse one file and rebuild the graph/importance from the updated
-        tag set (Session 8: debounced-save re-indexing). Only this file's
-        tags are re-extracted from disk -- the expensive part (tree-sitter
-        parsing + file IO) stays scoped to the one changed file, per the
-        session instructions ("re-run the Session 3 repomap module against
-        the changed file only"). Rebuilding the graph/importance from
-        `tags_by_file` is still whole-repo, but that part is pure in-memory
-        work over already-extracted tags, not file IO -- cheap at v0 scale,
-        and necessary because an edit to one file can change edges pointing
-        at or from other files (e.g. a new call site, a renamed function).
+        Re-parse one file and incrementally update the graph from the
+        updated tag set (Session 8: debounced-save re-indexing; Session 38:
+        made incremental). Only this file's tags are re-extracted from disk,
+        and -- as of Session 38 -- only this file's own def/ref delta plus
+        whatever other files' refs point at names this file defines are
+        touched to update the graph; no other file is re-scanned and no
+        other file's nodes/edges are recomputed. See
+        `graph.py::update_call_graph_for_file`'s docstring for the
+        correctness argument.
+
+        PageRank (`compute_importance`) still runs over the *whole* updated
+        graph every call, unchanged from before: Session 33 measured it at
+        only ~83ms of a ~440ms full `reindex_file` at pokerogue's real scale
+        (~19%), so incrementalizing it too -- which Core Rule 3 forbids
+        rewriting the algorithm itself to do anyway -- wasn't worth the risk
+        here; the graph-rebuild share it was paired with is the part this
+        session's incremental update actually removes.
 
         Returns the number of functions now indexed for `rel_fname`.
         """
+        if self.graph is None:
+            # `index()` was never called first, so `defs_by_name`/
+            # `refs_by_name`/`defs_by_file` were never populated for the
+            # rest of the repo. Building the incremental update on top of
+            # that would silently scope them to just this one file instead
+            # of the whole repo -- do a real full index instead.
+            self.index()
+            return sum(1 for t in self.tags_by_file.get(rel_fname, []) if t.kind == "def")
+
         fname = os.path.join(self.root, rel_fname)
-        self.tags_by_file[rel_fname] = extract_tags(fname, rel_fname)
-        self.graph = build_call_graph(self.tags_by_file)
+        old_tags = self.tags_by_file.get(rel_fname, [])
+        old_defs = [t for t in old_tags if t.kind == "def"]
+        old_refs = [t for t in old_tags if t.kind == "ref"]
+
+        new_tags = extract_tags(fname, rel_fname)
+        new_defs = [t for t in new_tags if t.kind == "def"]
+        new_refs = [t for t in new_tags if t.kind == "ref"]
+
+        self.tags_by_file[rel_fname] = new_tags
+        update_call_graph_for_file(
+            self.graph,
+            self.defs_by_name,
+            self.defs_by_file,
+            self.refs_by_name,
+            rel_fname,
+            old_defs,
+            old_refs,
+            new_defs,
+            new_refs,
+        )
         self.importance = compute_importance(self.graph)
-        return sum(1 for tag in self.tags_by_file[rel_fname] if tag.kind == "def")
+        return sum(1 for tag in new_defs if tag.kind == "def")
 
     def list_functions(self) -> list[NodeId]:
         if self.graph is None:
