@@ -121,8 +121,20 @@ export class BackgroundFlushManager implements vscode.Disposable {
                 // rather than raced against here.
                 const fnIdsToCheck = [...fnIds];
 
+                // Session 36: this loop is autonomous background work (a
+                // timer tick, no direct user action behind it), same
+                // shape as BackgroundIndexManager's pre-generation walk --
+                // defer to any pending/imminent interactive request before
+                // sending each of its own RPCs, per session 32's gate
+                // (extended to this class and GitHookReindexManager this
+                // session; see sidecarManager.ts's waitForInteractiveIdle).
+                await sidecar.waitForInteractiveIdle(token);
+                if (token.isCancellationRequested) {
+                    break;
+                }
+
                 try {
-                    await sidecar.request('reindex_file', { file_path: relFile }, REINDEX_TIMEOUT_MS);
+                    await sidecar.request('reindex_file', { file_path: relFile }, REINDEX_TIMEOUT_MS, 'background');
                 } catch (err) {
                     this.output.appendLine(`background-flush: reindex_file failed for ${relFile}: ${String(err)}`);
                     // Leave every fnId in this file dirty -- retried next cycle.
@@ -172,8 +184,16 @@ export class BackgroundFlushManager implements vscode.Disposable {
                         promptVersion: PROMPT_VERSION,
                     });
 
+                    // Session 36: same gate as above, immediately before the
+                    // actual generate_explanation send -- once sent, nothing
+                    // can preempt it (Core Rule 11).
+                    await sidecar.waitForInteractiveIdle(token);
+                    if (token.isCancellationRequested) {
+                        break;
+                    }
+
                     try {
-                        const row = await generateAndCache(sidecar, cache, fn);
+                        const row = await generateAndCache(sidecar, cache, fn, 'background');
                         flushed++;
                         dirtyTracker.clearFnId(relFile, fnId);
                         regeneratedThisTick.push({ relFile, fnId });
@@ -193,7 +213,18 @@ export class BackgroundFlushManager implements vscode.Disposable {
                 }
 
                 if (staleTracker && changedFunctions.length > 0) {
-                    await flagStaleDependents(sidecar, workspaceRoot, relFile, changedFunctions, staleTracker, this.output);
+                    await sidecar.waitForInteractiveIdle(token);
+                    if (!token.isCancellationRequested) {
+                        await flagStaleDependents(
+                            sidecar,
+                            workspaceRoot,
+                            relFile,
+                            changedFunctions,
+                            staleTracker,
+                            this.output,
+                            'background'
+                        );
+                    }
                 }
             }
 

@@ -83,9 +83,25 @@ export class BackgroundIndexManager implements vscode.Disposable {
         this.cancellationSource = source;
         const token = source.token;
 
+        // Session 36: this one-shot call is autonomous background work (this
+        // pass's own startup, not a direct user action) just like the
+        // per-function generate_explanation calls below, but was left at
+        // implicit 'interactive' priority and ungated when session 32 first
+        // added the gate -- found by this session's own RPC-call-site audit.
+        await sidecar.waitForInteractiveIdle(token);
+        if (token.isCancellationRequested) {
+            this.finish(source);
+            return;
+        }
+
         let ranked: RankedFunction[];
         try {
-            const result = await sidecar.request<{ functions: RankedFunction[] }>('list_ranked_functions', {});
+            const result = await sidecar.request<{ functions: RankedFunction[] }>(
+                'list_ranked_functions',
+                {},
+                undefined,
+                'background'
+            );
             ranked = result.functions;
         } catch (err) {
             this.output.appendLine(`background-index: list_ranked_functions failed: ${String(err)}`);
@@ -147,15 +163,17 @@ export class BackgroundIndexManager implements vscode.Disposable {
             // still avoid starting a new collision. See
             // SidecarManager.waitForInteractiveIdle's doc comment.
             //
-            // Raced against `token`, not a bare `await` -- a steady stream of
-            // interactive activity (exactly the scenario this session
-            // targets) can otherwise leave `waitForInteractiveIdle()` parked
-            // for an extended, unbounded stretch, during which "Cancel
-            // Background Indexing" would silently have no effect (found by
-            // code-reviewer during this session; same race-against-token
-            // shape as `delay()` below, just against a caller-supplied
-            // promise instead of a fixed timer).
-            await this.raceAgainstCancellation(sidecar.waitForInteractiveIdle(), token);
+            // Passing `token` lets `waitForInteractiveIdle` itself resolve
+            // early on cancellation (moved into `SidecarManager` in Session
+            // 36 so `BackgroundFlushManager`/`GitHookReindexManager` get the
+            // same responsiveness for free instead of each needing their own
+            // copy of this session's original `raceAgainstCancellation`
+            // wrapper) -- without it, a steady stream of interactive
+            // activity could otherwise leave this parked for an extended,
+            // unbounded stretch, during which "Cancel Background Indexing"
+            // would silently have no effect (found by code-reviewer during
+            // session 32).
+            await sidecar.waitForInteractiveIdle(token);
             if (token.isCancellationRequested) {
                 break;
             }
@@ -229,32 +247,6 @@ export class BackgroundIndexManager implements vscode.Disposable {
                 subscription.dispose();
                 resolve();
             });
-        });
-    }
-
-    /**
-     * Session 32: same "resolve early on cancel" shape as `delay()` above,
-     * for a caller-supplied promise (`sidecar.waitForInteractiveIdle()`)
-     * instead of a fixed timer -- that wait has no cancellation token of its
-     * own to pass through, and can legitimately run for an extended, open-
-     * ended stretch while interactive activity keeps arriving, which
-     * shouldn't leave "Cancel Background Indexing" unresponsive in the
-     * meantime. Doesn't cancel `awaited` itself (it has no cancel handle);
-     * just stops this loop from waiting on it further once `token` fires.
-     */
-    private raceAgainstCancellation(awaited: Promise<void>, token: vscode.CancellationToken): Promise<void> {
-        return new Promise((resolve) => {
-            let settled = false;
-            const finish = () => {
-                if (settled) {
-                    return;
-                }
-                settled = true;
-                subscription.dispose();
-                resolve();
-            };
-            const subscription = token.onCancellationRequested(finish);
-            void awaited.then(finish);
         });
     }
 }
