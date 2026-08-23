@@ -33,6 +33,26 @@ export class SaveReindexManager implements vscode.Disposable {
     private readonly debouncer = new KeyedDebouncer<string>(DEBOUNCE_MS);
     private readonly saveSubscription: vscode.Disposable;
 
+    // Session 41: `KeyedDebouncer` only cancels a *pending timer* -- once a
+    // timer fires and its `reindex()` call starts actually running (which,
+    // via `generateAndCache`'s real-generation round trip, can take up to
+    // `GENERATE_TIMEOUT_MS` = 120s per function), a second save's timer can
+    // still fire and start a fully concurrent second `reindex()` for the
+    // SAME document. Each call reads whatever the live buffer holds at ITS
+    // OWN read time, so this isn't just wasted work: `ExplanationCache.
+    // write()`'s default eviction (session 39) deletes whatever row
+    // `getCurrentRowForFnId` reports as "current" by `generated_at`
+    // recency, not content freshness -- a slower call finishing after a
+    // faster one silently evicts the correct, up-to-date row and leaves its
+    // own stale one behind. These two maps extend the debouncer's own
+    // "several rapid triggers collapse to one" intent to cover a reindex
+    // that's already *running*, not just one still pending: a save that
+    // lands mid-reindex is recorded in `rerunRequested` instead of starting
+    // a second concurrent pass, and picked up as a fresh, fully up-to-date
+    // rerun the moment the in-flight one finishes.
+    private readonly inFlight = new Map<string, Promise<void>>();
+    private readonly rerunRequested = new Set<string>();
+
     constructor(
         private readonly getWorkspaceRoot: () => string | undefined,
         private readonly getCache: () => ExplanationCache | undefined,
@@ -51,8 +71,28 @@ export class SaveReindexManager implements vscode.Disposable {
         // repeated saves of the *same* file within the window collapse to
         // one trailing re-index instead of one per save.
         this.debouncer.schedule(document.uri.toString(), () => {
-            void this.reindex(document);
+            this.runReindex(document);
         });
+    }
+
+    /** Starts `reindex()` for `document`, or defers to a rerun if one is already in flight for it. */
+    private runReindex(document: vscode.TextDocument): void {
+        const key = document.uri.toString();
+        if (this.inFlight.has(key)) {
+            this.rerunRequested.add(key);
+            return;
+        }
+
+        const run = this.reindex(document).finally(() => {
+            this.inFlight.delete(key);
+            if (this.rerunRequested.delete(key)) {
+                // Picks up whatever the buffer holds NOW, not whatever it
+                // held when the superseded save fired -- the whole point of
+                // deferring rather than running concurrently.
+                this.runReindex(document);
+            }
+        });
+        this.inFlight.set(key, run);
     }
 
     private async reindex(document: vscode.TextDocument): Promise<void> {
