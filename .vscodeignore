@@ -10,6 +10,11 @@
 src/**
 tsconfig.json
 
+# Compiled test output -- ships nothing under src/__tests__/, but tsc's
+# own output layout mirrors src/ under out/, so the compiled tests land
+# in out/ too and need their own exclusion.
+out/extension/__tests__/**
+
 # Dev/test-only content
 .claude/**
 .git/**
@@ -27,6 +32,18 @@ package-lock.json
 # Docs meant for contributors, not extension users
 CLAUDE.md
 codebase-explainer-vscode-extension.md
+lucidhover-current-state.md
+lucidhover-session-briefs-20-25_1.md
+workflow-review.md
+docs/**
+
+# better-sqlite3 ships prebuilt binaries per platform under prebuilds/
+# (loaded directly by lib/binding.js) -- deps/ (vendored SQLite C
+# amalgamation) and src/ (the native addon's C++ source) are only used
+# to compile from source via node-gyp, which never happens at runtime
+# since a matching prebuild always exists for our supported platforms.
+node_modules/better-sqlite3/deps/**
+node_modules/better-sqlite3/src/**
 
 # Build/cache artifacts that can end up on disk locally
 **/__pycache__/**
