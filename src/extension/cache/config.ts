@@ -126,8 +126,21 @@ export const EMBEDDING_MODEL_ID = 'all-minilm';
  * Decision #2 ("Any change to context composition, model, or prompt
  * template must be reflected in this key"), so old rows generated under
  * the previous prompt don't get served as if they reflect the new one.
+ *
+ * `few-shot-v5` (was `few-shot-v4`, Session 42): sidecar/generation/
+ * prompt.py's `side_effects` field rule now explicitly says caller count /
+ * importance has no bearing on whether a function has side effects, and a
+ * fifth few-shot example (`_EXAMPLE_5`, `getActiveUsers`) was added showing
+ * a pure getter with several real callers and an empty `side_effects` --
+ * targets the verbatim-category-list hallucination sessions 25/28 both
+ * observed on real pure/trivial functions with real callers (pokerogue's
+ * `getPlayerParty`, the TS fixture's `isEmpty<T>`/`handleLoginRoute`), where
+ * the model copied the field rule's own illustrative phrases ("reading or
+ * writing a file", "sending a message or notification", "mutating a
+ * parameter or global") into the answer instead of grounding effects in the
+ * function's actual body.
  */
-export const PROMPT_VERSION = 'few-shot-v4';
+export const PROMPT_VERSION = 'few-shot-v5';
 
 /**
  * Session 15 (Build Order step 15, secondary summary-doc generator,

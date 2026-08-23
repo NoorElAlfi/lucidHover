@@ -45,7 +45,10 @@ given, say so plainly rather than inventing a reason.
 function's body -- for example a database write, a network/API call, reading or writing a file, \
 sending a message or notification, or mutating a parameter or global. That list names the *kinds* \
 of thing to look for, not fixed text to output -- never copy it verbatim into your answer; ground \
-each entry in what this specific function's code does. Every distinct effect you find is its own \
+each entry in what this specific function's code does. How many callers a function has, or how \
+important it looks in the codebase, says nothing about whether it has side effects -- a \
+heavily-used function can be perfectly pure; judge this only from what the function's own body \
+actually does, never from its caller count or ranking. Every distinct effect you find is its own \
 array element -- if the function has three effects, output three separate strings, never one \
 string joining them together with commas. Empty array if none -- never invent one, and never list \
 a category just because it was mentioned above if this function doesn't actually do it.
@@ -273,7 +276,51 @@ _EXAMPLE_4 = FewShotExample(
     },
 )
 
-FEW_SHOT_EXAMPLES = [_EXAMPLE_1, _EXAMPLE_2, _EXAMPLE_3, _EXAMPLE_4]
+_EXAMPLE_5 = FewShotExample(
+    fn_source=(
+        "function getActiveUsers(store) {\n"
+        "  return store.users;\n"
+        "}"
+    ),
+    caller_names=["renderDashboard", "exportUsersReport", "syncUserCache", "userCountWidget", "adminUserList"],
+    callee_names=[],
+    context_bundle=(
+        "Callers (5):\n"
+        "  - renderDashboard (ui/dashboard.js:22)\n"
+        "  - exportUsersReport (reports/users.js:8)\n"
+        "  - syncUserCache (cache/userCache.js:15)\n"
+        "  - userCountWidget (ui/widgets/userCount.js:4)\n"
+        "  - adminUserList (admin/userList.js:11)\n"
+        "Callees (0):\n"
+        "  none"
+    ),
+    reasoning=(
+        "This function has five real callers, so it's clearly used throughout the codebase -- but "
+        "how widely a function is used says nothing about whether it has side effects; that's a "
+        "separate question I can only answer by reading this function's own body. The body is a "
+        "single property read with no assignment, no I/O call, no external call, and no callees -- "
+        "it doesn't write anything, call anything external, or mutate its argument. It would be "
+        "tempting to assume a function with this many callers must do something significant, but "
+        "the source shows it doesn't, so side_effects is empty even though the function is widely "
+        "used. No risk visible either."
+    ),
+    explanation={
+        "role_tag": "Accessor",
+        "one_liner": "Returns the current list of active users from the store.",
+        "why_it_exists": (
+            "A simple accessor used across the app wherever the active user list is needed -- by "
+            "renderDashboard, exportUsersReport, and syncUserCache, plus 2 other UI/admin "
+            "consumers -- so every caller reads from the same store field instead of reaching into "
+            "it directly."
+        ),
+        "used_by": ["renderDashboard", "exportUsersReport", "syncUserCache", "userCountWidget", "adminUserList"],
+        "calls": [],
+        "side_effects": [],
+        "risk_note": None,
+    },
+)
+
+FEW_SHOT_EXAMPLES = [_EXAMPLE_1, _EXAMPLE_2, _EXAMPLE_3, _EXAMPLE_4, _EXAMPLE_5]
 
 
 TOP_K_HIGHLIGHT = 3
