@@ -88,12 +88,15 @@ def scratch_repo_map(tmp_path):
 def _assert_matches_full_rebuild(rm):
     """Session 38: `reindex_file`'s incremental graph update must always
     produce exactly the graph a full `build_call_graph` rescan of every file
-    would -- same nodes, same edges, same weights. This is the invariant the
-    whole incremental design rests on."""
+    would -- same nodes, same edges, same weights (and, since Session 44,
+    same `confident` flag per edge). This is the invariant the whole
+    incremental design rests on."""
     fresh = build_call_graph(rm.tags_by_file)
     assert set(rm.graph.nodes) == set(fresh.nodes)
-    actual_edges = {(u, v): rm.graph[u][v]["weight"] for u, v in rm.graph.edges}
-    fresh_edges = {(u, v): fresh[u][v]["weight"] for u, v in fresh.edges}
+    actual_edges = {
+        (u, v): (rm.graph[u][v]["weight"], rm.graph[u][v]["confident"]) for u, v in rm.graph.edges
+    }
+    fresh_edges = {(u, v): (fresh[u][v]["weight"], fresh[u][v]["confident"]) for u, v in fresh.edges}
     assert actual_edges == fresh_edges
 
 
@@ -186,21 +189,28 @@ def test_reindex_file_leaves_other_files_call_graph_intact(scratch_repo_map):
     _assert_matches_full_rebuild(rm)
 
 
-def test_reindex_file_new_file_with_duplicate_name_fans_out_to_both(scratch_repo_map):
+def test_reindex_file_new_file_with_duplicate_name_in_other_file_drops_from_context(
+    scratch_repo_map,
+):
     """
     Session 38: `reindex_file` must find *existing* callers of a name without
     reindexing their file, via the reverse ref-by-name index -- not just
-    handle same-file changes. Adding a second `validateEmail` in a brand-new
-    file and reindexing only that new file must fan
-    `validateAndPersistSignup`'s existing call out to both definitions,
-    without `handlers.js` (the caller's file) ever being reindexed.
+    handle same-file changes. Session 44 changed what happens once that
+    fan-out is found: `validateAndPersistSignup` (in handlers.js) calling
+    `validateEmail` becomes ambiguous once a second `validateEmail` exists in
+    a brand-new third file, and neither candidate shares a file with the
+    caller -- so both edges exist in the graph (ranking still sees the
+    fan-out, confirmed via `_assert_matches_full_rebuild`'s confident-aware
+    comparison below) but neither is a *confident* callee, so
+    `get_function_context` now reports none. This deliberately replaces the
+    old "fans out to both" expectation the pre-Session-44 version of this
+    test asserted.
     """
     rm, scratch_root = scratch_repo_map
 
     shared = next(n for n in rm.list_functions() if n[1] == "validateAndPersistSignup")
     before = {(c.rel_fname, c.name) for c in rm.get_function_context(*shared).callees}
-    assert ("utils.js", "validateEmail") in before
-    assert not any(name == "validateEmail" and fname != "utils.js" for fname, name in before)
+    assert ("utils.js", "validateEmail") in before  # unambiguous (one match) -- still confident
 
     new_file = scratch_root / "new_helpers.js"
     new_file.write_text(
@@ -211,8 +221,41 @@ def test_reindex_file_new_file_with_duplicate_name_fans_out_to_both(scratch_repo
     rm.reindex_file("new_helpers.js")
 
     after = {(c.rel_fname, c.name) for c in rm.get_function_context(*shared).callees}
-    assert ("utils.js", "validateEmail") in after
-    assert ("new_helpers.js", "validateEmail") in after
+    assert not any(name == "validateEmail" for _, name in after)
+    # The ambiguous edges still exist in the underlying graph for PageRank
+    # (Core Rule 3 -- ranking is untouched), just not as confident callees.
+    graph_callees = {n[:2] for n in rm.graph.successors(shared)}
+    assert ("utils.js", "validateEmail") in graph_callees
+    assert ("new_helpers.js", "validateEmail") in graph_callees
+    _assert_matches_full_rebuild(rm)
+
+
+def test_reindex_file_new_file_with_duplicate_name_in_callers_own_file_is_preferred(
+    scratch_repo_map,
+):
+    """
+    Session 44: the same ambiguous-`validateEmail` scenario as above, except
+    the new duplicate is added to `handlers.js` itself -- the caller's own
+    file. Same-file candidates are preferred when a name is ambiguous, so
+    `validateAndPersistSignup`'s confident callee should narrow to just the
+    same-file one, dropping the unrelated `utils.js` definition even though
+    it's still a name match.
+    """
+    rm, scratch_root = scratch_repo_map
+
+    shared = next(n for n in rm.list_functions() if n[1] == "validateAndPersistSignup")
+
+    handlers_path = scratch_root / "handlers.js"
+    handlers_path.write_text(
+        handlers_path.read_text(encoding="utf-8")
+        + "\nfunction validateEmail(email) {\n  return email.includes('@');\n}\n",
+        encoding="utf-8",
+    )
+    rm.reindex_file("handlers.js")
+
+    after = {(c.rel_fname, c.name) for c in rm.get_function_context(*shared).callees}
+    assert ("handlers.js", "validateEmail") in after
+    assert ("utils.js", "validateEmail") not in after
     _assert_matches_full_rebuild(rm)
 
 

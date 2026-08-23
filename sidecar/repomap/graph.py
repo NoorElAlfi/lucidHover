@@ -18,6 +18,23 @@ for long/mentioned identifiers, 0.1x suppression for "_"-prefixed or
 identifiers. Those exist to shape a *token-budgeted whole-repo* ranking;
 here every call edge counts equally (weight = number of call sites), and
 importance is left to PageRank via rank.py.
+
+Session 44: every edge also carries a `confident` flag. PageRank (rank.py)
+still runs over every edge regardless -- fanning an ambiguous name out to
+every same-named definition, unfiltered, is exactly what Aider does and
+Core Rule 3 says not to rebuild that algorithm. But `context.py`'s
+`get_function_context()` (the thing that becomes "Known callers/callees" in
+the generation prompt and the acceptance report -- both display it as
+asserted fact about one specific function, not a ranking signal) filters to
+`confident` edges only: an edge is confident if the name it resolved from
+was unambiguous (exactly one matching def repo-wide), or if it was
+ambiguous but the chosen def shares a file with the referencing call site
+(the same-file candidate is far more likely to be the real target than an
+unrelated file's same-named method -- e.g. a Phaser `Sprite.setVisible()`
+call colliding by name with an unrelated `Dropdown.setVisible()` method
+elsewhere in the repo). An ambiguous name with no same-file candidate
+produces edges that exist (for ranking) but are never confident (so never
+shown as a specific function's known caller/callee).
 """
 
 from __future__ import annotations
@@ -77,11 +94,30 @@ def build_indices(
     return defs_by_name, defs_by_file, refs_by_name
 
 
-def _add_or_increment_edge(graph: nx.DiGraph, caller_id: NodeId, callee_id: NodeId) -> None:
+def _add_or_increment_edge(
+    graph: nx.DiGraph, caller_id: NodeId, callee_id: NodeId, confident: bool
+) -> None:
     if graph.has_edge(caller_id, callee_id):
         graph[caller_id][callee_id]["weight"] += 1
+        if confident:
+            graph[caller_id][callee_id]["confident"] = True
     else:
-        graph.add_edge(caller_id, callee_id, weight=1)
+        graph.add_edge(caller_id, callee_id, weight=1, confident=confident)
+
+
+def _confident_callee_ids(callees: list[Tag], ref_rel_fname: str) -> set[NodeId]:
+    """
+    Which of `callees` (every def matching one ref's name) should be trusted
+    as *that ref's* real target. Unambiguous (single match) is always
+    trusted. Ambiguous is trusted only for same-file matches -- a call site
+    is far more likely to resolve to a definition in its own file than an
+    unrelated same-named one elsewhere; if no same-file candidate exists,
+    none of the matches are trusted (see module docstring, Session 44).
+    """
+    if len(callees) == 1:
+        return {_node_id(callees[0])}
+    same_file = [c for c in callees if c.rel_fname == ref_rel_fname]
+    return {_node_id(c) for c in same_file}
 
 
 def build_call_graph(tags_by_file: dict[str, list[Tag]]) -> nx.DiGraph:
@@ -89,7 +125,8 @@ def build_call_graph(tags_by_file: dict[str, list[Tag]]) -> nx.DiGraph:
     Build a directed graph where nodes are function/method definitions and
     an edge caller -> callee means caller's body contains a call resolving
     to callee's name. Ambiguous names (defined in multiple files) fan out to
-    every matching definition, same as Aider does for unresolved-file idents.
+    every matching definition, same as Aider does for unresolved-file idents
+    -- each such edge is marked `confident` or not per `_confident_callee_ids`.
     """
     defs_by_name, defs_by_file, refs_by_name = build_indices(tags_by_file)
     all_defs = [d for defs in defs_by_file.values() for d in defs]
@@ -107,9 +144,10 @@ def build_call_graph(tags_by_file: dict[str, list[Tag]]) -> nx.DiGraph:
         if not callees:
             continue  # unresolved: external/builtin call, no matching def
         caller_id = _node_id(caller_def)
+        confident_ids = _confident_callee_ids(callees, ref.rel_fname)
         for callee in callees:
             callee_id = _node_id(callee)
-            _add_or_increment_edge(graph, caller_id, callee_id)
+            _add_or_increment_edge(graph, caller_id, callee_id, callee_id in confident_ids)
 
     return graph
 
@@ -189,8 +227,10 @@ def update_call_graph_for_file(
         if not callees:
             continue
         caller_id = _node_id(caller_def)
+        confident_ids = _confident_callee_ids(callees, ref.rel_fname)
         for callee in callees:
-            _add_or_increment_edge(graph, caller_id, _node_id(callee))
+            callee_id = _node_id(callee)
+            _add_or_increment_edge(graph, caller_id, callee_id, callee_id in confident_ids)
 
     # Incoming edges into this file's new defs, from other files' refs --
     # found via the reverse index instead of scanning every other file.
@@ -199,6 +239,7 @@ def update_call_graph_for_file(
     new_def_names = {d.name for d in new_defs}
     for name in new_def_names:
         callees_here = [d for d in new_defs if d.name == name]
+        all_callees_for_name = defs_by_name.get(name, [])
         for ref in refs_by_name.get(name, []):
             if ref.rel_fname == rel_fname:
                 continue  # this file's own refs are handled above
@@ -206,5 +247,34 @@ def update_call_graph_for_file(
             if caller_def is None:
                 continue
             caller_id = _node_id(caller_def)
+            confident_ids = _confident_callee_ids(all_callees_for_name, ref.rel_fname)
             for callee in callees_here:
-                _add_or_increment_edge(graph, caller_id, _node_id(callee))
+                callee_id = _node_id(callee)
+                _add_or_increment_edge(graph, caller_id, callee_id, callee_id in confident_ids)
+
+    # `confident` (unlike weight) is not purely additive: it's a function of
+    # a name's *entire* repo-wide candidate set, so adding or removing a
+    # same-named def in `rel_fname` can flip confidence on an edge between
+    # two other, untouched files that share that name (e.g. a pre-existing
+    # X -> Y edge was confident because Y was the only match; this file just
+    # added a second match Z, so X -> Y must now become unconfident even
+    # though neither X, Y, nor the X -> Y edge's own file is `rel_fname`).
+    # The two loops above only create/update edges touching `rel_fname`
+    # itself; this pass corrects confidence on every *other* existing edge
+    # for every name whose candidate set just changed, found the same way
+    # (`refs_by_name`) rather than rescanning the repo.
+    affected_names = {d.name for d in old_defs} | new_def_names
+    for name in affected_names:
+        callees = defs_by_name.get(name, [])
+        if not callees:
+            continue
+        for ref in refs_by_name.get(name, []):
+            caller_def = _enclosing_def(ref, defs_by_file)
+            if caller_def is None:
+                continue
+            caller_id = _node_id(caller_def)
+            confident_ids = _confident_callee_ids(callees, ref.rel_fname)
+            for callee in callees:
+                callee_id = _node_id(callee)
+                if graph.has_edge(caller_id, callee_id):
+                    graph[caller_id][callee_id]["confident"] = callee_id in confident_ids

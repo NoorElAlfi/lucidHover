@@ -134,11 +134,19 @@ class RepoMap:
         if self.graph is None or node_id not in self.graph:
             return FunctionContext(rel_fname, name, line)
 
+        # Session 44: only `confident` edges are shown as this function's
+        # specific known callers/callees (fed into the generation prompt and
+        # the acceptance report as asserted fact) -- an ambiguous name with
+        # no same-file candidate stays in the graph (PageRank still uses it,
+        # untouched) but is never confident, so it's excluded here. See
+        # graph.py's module docstring and `_confident_callee_ids`.
         callees_all = sorted(
-            self.graph.successors(node_id), key=lambda n: -self.importance.get(n, 0.0)
+            (n for n in self.graph.successors(node_id) if self.graph[node_id][n].get("confident")),
+            key=lambda n: -self.importance.get(n, 0.0),
         )
         callers_all = sorted(
-            self.graph.predecessors(node_id), key=lambda n: -self.importance.get(n, 0.0)
+            (n for n in self.graph.predecessors(node_id) if self.graph[n][node_id].get("confident")),
+            key=lambda n: -self.importance.get(n, 0.0),
         )
         callees, callees_omitted = self._cap(callees_all)
         callers, callers_omitted = self._cap(callers_all)
