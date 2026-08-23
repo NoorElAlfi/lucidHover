@@ -17,6 +17,7 @@ import pytest
 
 from sidecar.repomap.context import RepoMap
 from sidecar.repomap.extraction import find_source_files
+from sidecar.repomap.graph import build_call_graph
 from sidecar.tests.fixture_paths import fixture_repomap_root
 
 FIXTURE_ROOT = fixture_repomap_root("javascript")
@@ -84,6 +85,18 @@ def scratch_repo_map(tmp_path):
     return rm, scratch_root
 
 
+def _assert_matches_full_rebuild(rm):
+    """Session 38: `reindex_file`'s incremental graph update must always
+    produce exactly the graph a full `build_call_graph` rescan of every file
+    would -- same nodes, same edges, same weights. This is the invariant the
+    whole incremental design rests on."""
+    fresh = build_call_graph(rm.tags_by_file)
+    assert set(rm.graph.nodes) == set(fresh.nodes)
+    actual_edges = {(u, v): rm.graph[u][v]["weight"] for u, v in rm.graph.edges}
+    fresh_edges = {(u, v): fresh[u][v]["weight"] for u, v in fresh.edges}
+    assert actual_edges == fresh_edges
+
+
 def test_reindex_file_picks_up_new_call_edge(scratch_repo_map):
     """
     Session 8: `reindex_file` re-parses one file and rebuilds the graph so a
@@ -113,6 +126,27 @@ def test_reindex_file_picks_up_new_call_edge(scratch_repo_map):
     ctx = rm.get_function_context(*is_empty_after)
     callee_names = {c.name for c in ctx.callees}
     assert "validateEmail" in callee_names
+    _assert_matches_full_rebuild(rm)
+
+
+def test_reindex_file_before_index_falls_back_to_a_real_full_index(tmp_path):
+    """
+    Session 38: calling `reindex_file` before `index()` must not silently
+    scope `tags_by_file`/`defs_by_name`/`refs_by_name` to just the one
+    reindexed file -- it must fall back to a real, full `index()` so the
+    rest of the repo's tags are still there.
+    """
+    shutil.copytree(FIXTURE_ROOT, tmp_path / "repomap")
+    scratch_root = tmp_path / "repomap"
+    rm = RepoMap(str(scratch_root))
+
+    functions_indexed = rm.reindex_file("utils.js")
+
+    assert functions_indexed == 4  # validateEmail, hashPassword, formatDate, isEmpty
+    assert len(rm.list_functions()) == 21  # every file, not just utils.js
+    insert_user = next(n for n in rm.list_functions() if n[1] == "insertUser")
+    callee_names = {(c.rel_fname, c.name) for c in rm.get_function_context(*insert_user).callees}
+    assert ("utils.js", "validateEmail") in callee_names
 
 
 def test_find_source_files_includes_every_registered_language_excludes_unknown(tmp_path):
@@ -149,3 +183,65 @@ def test_reindex_file_leaves_other_files_call_graph_intact(scratch_repo_map):
     ctx = rm.get_function_context(*insert_user)
     callee_names = {(c.rel_fname, c.name) for c in ctx.callees}
     assert ("utils.js", "validateEmail") in callee_names
+    _assert_matches_full_rebuild(rm)
+
+
+def test_reindex_file_new_file_with_duplicate_name_fans_out_to_both(scratch_repo_map):
+    """
+    Session 38: `reindex_file` must find *existing* callers of a name without
+    reindexing their file, via the reverse ref-by-name index -- not just
+    handle same-file changes. Adding a second `validateEmail` in a brand-new
+    file and reindexing only that new file must fan
+    `validateAndPersistSignup`'s existing call out to both definitions,
+    without `handlers.js` (the caller's file) ever being reindexed.
+    """
+    rm, scratch_root = scratch_repo_map
+
+    shared = next(n for n in rm.list_functions() if n[1] == "validateAndPersistSignup")
+    before = {(c.rel_fname, c.name) for c in rm.get_function_context(*shared).callees}
+    assert ("utils.js", "validateEmail") in before
+    assert not any(name == "validateEmail" and fname != "utils.js" for fname, name in before)
+
+    new_file = scratch_root / "new_helpers.js"
+    new_file.write_text(
+        "function validateEmail(email) {\n  return email.includes('@');\n}\n"
+        "module.exports = { validateEmail };\n",
+        encoding="utf-8",
+    )
+    rm.reindex_file("new_helpers.js")
+
+    after = {(c.rel_fname, c.name) for c in rm.get_function_context(*shared).callees}
+    assert ("utils.js", "validateEmail") in after
+    assert ("new_helpers.js", "validateEmail") in after
+    _assert_matches_full_rebuild(rm)
+
+
+def test_reindex_file_rename_updates_cross_file_edge_once_caller_reindexed(scratch_repo_map):
+    """
+    Session 38: a real cross-file rename -- `validateEmail` renamed to
+    `validateEmailAddress` in its defining file (utils.js) *and* at its call
+    site (handlers.js), each reindexed on its own as its own save would
+    trigger. The final graph must point at the new name's node and have no
+    dangling edge to the old, now-nonexistent one.
+    """
+    rm, scratch_root = scratch_repo_map
+
+    utils_path = scratch_root / "utils.js"
+    utils_path.write_text(
+        utils_path.read_text(encoding="utf-8").replace("validateEmail", "validateEmailAddress"),
+        encoding="utf-8",
+    )
+    rm.reindex_file("utils.js")
+
+    handlers_path = scratch_root / "handlers.js"
+    handlers_path.write_text(
+        handlers_path.read_text(encoding="utf-8").replace("validateEmail", "validateEmailAddress"),
+        encoding="utf-8",
+    )
+    rm.reindex_file("handlers.js")
+
+    assert not any(n[1] == "validateEmail" for n in rm.list_functions())
+    shared = next(n for n in rm.list_functions() if n[1] == "validateAndPersistSignup")
+    callee_names = {(c.rel_fname, c.name) for c in rm.get_function_context(*shared).callees}
+    assert ("utils.js", "validateEmailAddress") in callee_names
+    _assert_matches_full_rebuild(rm)
