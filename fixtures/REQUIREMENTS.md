@@ -132,7 +132,7 @@ so ranked call-graph output is identical before and after the move.
 ## TypeScript fixture: checked against this list (Session 24)
 
 `fixtures/typescript/repomap/` — 8 files (`models.ts`, `logging.ts`, `utils.ts`, `db.ts`,
-`email.ts`, `audit.ts`, `handlers.ts`, `dashboard.tsx`), 25 functions total, confirmed via
+`email.ts`, `audit.ts`, `handlers.ts`, `dashboard.tsx`), 26 functions total, confirmed via
 `python -m sidecar.repomap.cli fixtures/typescript/repomap` and checked into
 `sidecar/tests/test_repomap_typescript.py`.
 
@@ -164,3 +164,11 @@ so ranked call-graph output is identical before and after the move.
   namespace/decorator-aware query pattern; tree-sitter queries match regardless of nesting, so the
   ordinary function/method patterns already catch them (confirmed directly, see
   `typescript_tags.scm`'s header).
+- **Session 49 addition:** `audit.ts`'s `AuditLogger.record` (class method) now calls a new
+  top-level arrow-const, `auditWrite`, which itself calls `logEvent` (free function) — a
+  class-method -> arrow-const -> free-function chain the fixture didn't previously have, added
+  specifically to give the graph-view features (`get_blast_radius`/`get_call_trace`, sessions
+  45-48) a real multi-hop TS-shape chain to walk (session 49's cross-language validation pass).
+  `record` no longer calls `logEvent` directly (it now calls `auditWrite`, which does), so
+  `logEvent`'s total caller count is unchanged at 21 — only the function count moved, from 25 to
+  26.

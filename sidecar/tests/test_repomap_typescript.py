@@ -1,13 +1,18 @@
 """
 Content-specific smoke test for the TypeScript fixture (Session 24), mirroring
 test_repomap.py's JavaScript coverage but against fixtures/typescript/repomap
-(25 functions, 6 files -- including one `.tsx` file backed by a second
+(26 functions, 6 files -- including one `.tsx` file backed by a second
 manifest entry, `typescriptreact`, since real JSX needs the `language_tsx`
 grammar rather than `language_typescript` -- see typescript_tags.scm's header
 and this session's artifact for why). Session 23 deliberately left
 per-language content assertions un-looped across a shared test file (a second
 language's functions/counts are inherently its own); this is that second
 file.
+
+Session 49 added `audit.ts`'s `auditWrite` (a top-level arrow-const) between
+`AuditLogger.record` (a class method) and `logEvent` (a free function),
+bumping the count from 25 to 26 -- see the graph-view tests near the bottom
+of this file for why (blast radius / call trace cross-language validation).
 """
 
 from __future__ import annotations
@@ -31,7 +36,7 @@ def repo_map():
 
 
 def test_indexes_all_functions(repo_map):
-    assert len(repo_map.list_functions()) == 25
+    assert len(repo_map.list_functions()) == 26
 
 
 def test_most_called_function_ranks_highest(repo_map):
@@ -131,3 +136,29 @@ def test_reindex_file_leaves_line_shifted_functions_call_graph_intact(scratch_re
     actual_edges = {(u, v): rm.graph[u][v]["weight"] for u, v in rm.graph.edges}
     fresh_edges = {(u, v): fresh[u][v]["weight"] for u, v in fresh.edges}
     assert actual_edges == fresh_edges
+
+
+# Session 49: sessions 45-48 (get_blast_radius/get_call_trace) were only ever
+# exercised against the JavaScript fixture. `audit.ts`'s `record` (class
+# method) -> `auditWrite` (arrow-const) -> `logEvent` (free function) chain
+# gives both graph walks a real TS-specific-shape chain to run against --
+# arrow-const in particular is the exact def shape session 25 found a real
+# `isFunctionLike` bug on (extension-host side; these tests confirm the
+# sidecar-side tree-sitter capture and graph walk have no analogous gap).
+
+
+def test_call_trace_spans_class_method_arrow_const_and_free_function(repo_map):
+    record = next(n for n in repo_map.list_functions() if n[1] == "record")
+    trace = repo_map.get_call_trace(*record)
+    assert [(n.rel_fname, n.name, n.depth) for n in trace.nodes] == [
+        ("audit.ts", "auditWrite", 1),
+        ("logging.ts", "logEvent", 2),
+    ]
+    assert trace.branches == []
+
+
+def test_blast_radius_from_arrow_const_shows_class_method_caller(repo_map):
+    audit_write = next(n for n in repo_map.list_functions() if n[1] == "auditWrite")
+    blast = repo_map.get_blast_radius(*audit_write)
+    assert [(n.rel_fname, n.name, n.depth) for n in blast.nodes] == [("audit.ts", "record", 1)]
+    assert blast.omissions == []

@@ -70,6 +70,14 @@
       {
         "command": "lucidhover.purgeSupersededCache",
         "title": "LucidHover: Purge Superseded Cache Rows"
+      },
+      {
+        "command": "lucidhover.showBlastRadius",
+        "title": "LucidHover: Show Blast Radius for Function Under Cursor"
+      },
+      {
+        "command": "lucidhover.traceExecutionPath",
+        "title": "LucidHover: Trace Execution Path from Function Under Cursor"
       }
     ],
     "configuration": {

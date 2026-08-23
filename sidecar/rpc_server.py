@@ -65,6 +65,26 @@ Methods:
     already reads from, no second ranker. Backs the background
     pre-generation pass's walk order (most-likely-to-be-hovered functions
     first). No LLM call.
+  - "get_blast_radius" (Session 45): given a function's location, returns a
+    transitive-upstream-caller graph (who calls this, transitively, up to a
+    hardcoded depth) -- confident-edges-only, same filter
+    `get_function_context`'s single-hop callers already applies (Session 44).
+    Plain graph facts only (rel_fname/name/line/importance per node, edges as
+    caller/callee pairs); no cache lookups, no role_tag/one_liner -- the
+    extension host enriches from its own `ExplanationCache` afterward (Core
+    Rule 9). No LLM call.
+  - "get_call_trace" (Session 46): given a function's location, returns a
+    downstream single-primary-path call chain (what this calls, transitively,
+    following only the highest-importance confident callee at each hop, up to
+    a hardcoded depth) -- the mirror image of "get_blast_radius", same
+    confident-edges-only filter (Session 44). Plain graph facts only
+    (rel_fname/name/line/importance per node, edges as caller/callee pairs);
+    no cache lookups, no role_tag/one_liner -- the extension host enriches
+    from its own `ExplanationCache` afterward (Core Rule 9). No LLM call.
+    Session 48 adds `branches`: the non-primary confident callees passed
+    over at each hop (capped the same way `get_blast_radius`'s fan-out is,
+    session 47), so the primary path no longer silently swallows every
+    other real downstream call.
   - "generate_file_summary" (Session 15 / Build Order step 15, secondary
     summary-doc generator): given a file path and the already-generated
     role_tag/one_liner for each of its functions (the extension host reads
@@ -136,7 +156,7 @@ from typing import Any
 from .cache.hashing import CONTEXT_TIER_CALL_GRAPH_AND_RETRIEVAL, CONTEXT_TIER_CALL_GRAPH_ONLY, compute_context_hash
 from .generation.generate import generate_explanation, generate_file_summary
 from .generation.ollama_client import OLLAMA_BASE_URL, OllamaError
-from .repomap.context import FunctionContext, RepoMap
+from .repomap.context import BlastRadius, CallTrace, FunctionContext, RepoMap
 from .retrieval.retrieve import RetrievedChunk, query_top_k, reindex_file_chunks, reindex_repo_chunks
 from .retrieval.vectorstore import VectorStore
 
@@ -321,6 +341,39 @@ def _handle_list_ranked_functions(repo_map: RepoMap, _params: dict[str, Any]) ->
     return {"functions": functions}
 
 
+def _handle_get_blast_radius(repo_map: RepoMap, params: dict[str, Any]) -> dict[str, Any]:
+    rel_fname = params["file_path"]
+    name = params["name"]
+    line = params["line"]
+    with repo_map.lock.read_lock():
+        # Same nearest-line resolution as `_handle_generate_explanation`
+        # above -- `line` comes from VS Code's document-symbol provider,
+        # which doesn't always agree with tree-sitter's def line (see
+        # `_find_def_tag`'s own doc comment).
+        tag = _find_def_tag(repo_map, rel_fname, name, line)
+        if tag is not None:
+            blast = repo_map.get_blast_radius(rel_fname, tag.name, tag.start_line)
+        else:
+            blast = BlastRadius(rel_fname=rel_fname, name=name, line=line)
+    return asdict(blast)
+
+
+def _handle_get_call_trace(repo_map: RepoMap, params: dict[str, Any]) -> dict[str, Any]:
+    rel_fname = params["file_path"]
+    name = params["name"]
+    line = params["line"]
+    with repo_map.lock.read_lock():
+        # Same nearest-line resolution as `_handle_generate_explanation`/
+        # `_handle_get_blast_radius` above -- see `_find_def_tag`'s own doc
+        # comment.
+        tag = _find_def_tag(repo_map, rel_fname, name, line)
+        if tag is not None:
+            trace = repo_map.get_call_trace(rel_fname, tag.name, tag.start_line)
+        else:
+            trace = CallTrace(rel_fname=rel_fname, name=name, line=line)
+    return asdict(trace)
+
+
 def _handle_generate_file_summary(repo_map: RepoMap, params: dict[str, Any]) -> dict[str, Any]:
     file_path = params["file_path"]
     functions = params["functions"]
@@ -346,6 +399,8 @@ _METHODS = {
     "reindex_file": _handle_reindex_file,
     "resolve_function": _handle_resolve_function,
     "list_ranked_functions": _handle_list_ranked_functions,
+    "get_blast_radius": _handle_get_blast_radius,
+    "get_call_trace": _handle_get_call_trace,
     "generate_file_summary": _handle_generate_file_summary,
 }
 
