@@ -78,8 +78,21 @@
       {
         "command": "lucidhover.traceExecutionPath",
         "title": "LucidHover: Trace Execution Path from Function Under Cursor"
+      },
+      {
+        "command": "lucidhover.prioritizeFileIndexing",
+        "title": "LucidHover: Prioritize Indexing for This File"
       }
     ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "lucidhover.prioritizeFileIndexing",
+          "when": "resourceLangId == javascript || resourceLangId == typescript || resourceLangId == typescriptreact",
+          "group": "lucidhover"
+        }
+      ]
+    },
     "configuration": {
       "title": "LucidHover",
       "properties": {

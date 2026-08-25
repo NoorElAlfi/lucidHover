@@ -72,4 +72,35 @@ describe('languages.ts (repo-root languages.json reader)', () => {
             );
         });
     });
+
+    describe('package.json "Prioritize Indexing" context-menu when-clause agreement (Session 54)', () => {
+        // Same duplication-plus-drift-test tradeoff as the activationEvents
+        // check above, for the same reason (Core Rule 12 / session-21's
+        // Decided Q2): package.json's declarative `when` clause can't read
+        // languages.json at menu-contribution-registration time either, so
+        // this test is what keeps it from silently drifting instead.
+        it('the lucidhover.prioritizeFileIndexing editor/context when-clause names exactly languages.json\'s vscodeLanguageIds', () => {
+            const packageJson = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8')) as {
+                contributes: { menus: { 'editor/context': Array<{ command: string; when: string }> } };
+            };
+            const entry = packageJson.contributes.menus['editor/context'].find(
+                (e) => e.command === 'lucidhover.prioritizeFileIndexing'
+            );
+            assert.ok(entry, 'expected a lucidhover.prioritizeFileIndexing editor/context menu entry');
+
+            const manifestLanguages = loadLanguageManifest(path.join(REPO_ROOT, 'languages.json'));
+            const expected = [...manifestLanguages.values()].map((e) => e.vscodeLanguageId).sort();
+            const actual = entry!.when
+                .split('||')
+                .map((clause) => clause.trim().replace(/^resourceLangId == /, ''))
+                .sort();
+
+            assert.deepStrictEqual(
+                actual,
+                expected,
+                'lucidhover.prioritizeFileIndexing\'s editor/context when-clause has drifted from languages.json -- ' +
+                    'add/remove the matching "resourceLangId == <vscodeLanguageId>" clause.'
+            );
+        });
+    });
 });

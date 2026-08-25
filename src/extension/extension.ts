@@ -18,6 +18,7 @@ import {
     registerNavigateToFunctionCommand,
     registerShowMoreCommand,
 } from './panel/explanationPanelProvider';
+import { registerPrioritizeFileIndexingCommand } from './prioritizeFileIndexingCommand';
 import { registerPurgeSupersededCacheCommand } from './purgeSupersededCacheCommand';
 import { registerRefreshExplanationCommand } from './refreshExplanationCommand';
 import { SaveReindexManager } from './saveReindex';
@@ -304,6 +305,19 @@ export function activate(context: vscode.ExtensionContext): void {
     );
     context.subscriptions.push(backgroundIndexManager);
     context.subscriptions.push(registerToggleBackgroundIndexingCommand(backgroundIndexManager));
+
+    // Prioritized file indexing (Session 54) -- registered unconditionally
+    // (Core Rule 6, same pattern as the other commands above); a no-op with a
+    // status message until indexing has actually started under trust, same
+    // readiness check as "Refresh Explanation".
+    context.subscriptions.push(
+        registerPrioritizeFileIndexingCommand(
+            () => indexedWorkspaceRoot,
+            () => explanationCache ?? undefined,
+            () => sidecarManager ?? undefined,
+            output
+        )
+    );
 
     // Build Order step 14: `lucidHover.ollamaEndpoint` is spawn-time config
     // (see cache/config.ts's `resolveOllamaEndpoint` doc), so a user editing
