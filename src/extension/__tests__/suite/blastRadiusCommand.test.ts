@@ -232,4 +232,30 @@ suite('panel/blastRadiusCommand (Session 45, real sidecar, no Ollama needed -- g
         // renderGraph() turns into a "+1 more not shown" note under Level 1.
         assert.deepStrictEqual(payload.omissions, [{ depth: 1, omittedCount: MANY_CALLER_COUNT - 15 }]);
     });
+
+    test('an explicit target overrides the live cursor position (Session 52 fix)', async function () {
+        this.timeout(20_000);
+
+        // Cursor sits on manyTarget(), but an explicit `target` for target()
+        // is passed in -- this is exactly what ExplanationPanelProvider now
+        // does when its own tracked `currentFunction` differs from wherever
+        // the text cursor has since moved to. The computed graph must be for
+        // the explicit target, not the live cursor.
+        const manyTargetDocument = await vscode.workspace.openTextDocument(path.join(tempDir, 'manyTarget.js'));
+        const editor = await vscode.window.showTextDocument(manyTargetDocument);
+        const manyTargetResolved = await resolveEnclosingFunction(manyTargetDocument, new vscode.Position(0, 10), tempDir);
+        assert.ok(manyTargetResolved, 'expected to resolve manyTarget()');
+        editor.selection = new vscode.Selection(manyTargetResolved!.range.start, manyTargetResolved!.range.start);
+
+        const targetDocument = await vscode.workspace.openTextDocument(path.join(tempDir, 'target.js'));
+        const targetResolved = await resolveEnclosingFunction(targetDocument, new vscode.Position(0, 10), tempDir);
+        assert.ok(targetResolved, 'expected to resolve target()');
+
+        const showGraphSpy = sandbox.stub(panel, 'showGraph');
+        await showBlastRadius(() => tempDir, () => cache, () => sidecar, panel, output, targetResolved);
+
+        assert.strictEqual(showGraphSpy.calledOnce, true);
+        const payload = showGraphSpy.firstCall.args[0] as GraphViewPayload;
+        assert.strictEqual(payload.rootName, 'target', 'expected the graph to be computed for the explicit target, not the live cursor at manyTarget()');
+    });
 });

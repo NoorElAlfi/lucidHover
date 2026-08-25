@@ -152,32 +152,46 @@ function toGraphViewOmissions(omissions: readonly RawBlastRadiusOmission[]): Gra
  * by `extension.ts`'s own activation in the Extension Development Host every
  * integration test runs inside, so a second `registerCommand` call for the
  * same id throws.
+ *
+ * `target` (Session 52), when supplied, is used as-is instead of re-resolving
+ * from the live cursor -- `ExplanationPanelProvider` passes its own
+ * `currentFunction` here when the webview's "See full blast radius →" button
+ * fires, so the graph is computed for whatever the panel is actually
+ * showing, not wherever the cursor has since moved to (a real bug: the
+ * command previously always re-resolved from `activeTextEditor`, ignoring
+ * the panel entirely). Left undefined for a plain Command Palette
+ * invocation, which still needs live-cursor resolution -- there's no
+ * "currently displayed" function to draw from there.
  */
 export async function showBlastRadius(
     getWorkspaceRoot: () => string | undefined,
     getCache: () => ExplanationCache | undefined,
     getSidecar: () => SidecarManager | undefined,
     panel: ExplanationPanelProvider,
-    output: vscode.OutputChannel
+    output: vscode.OutputChannel,
+    target?: ResolvedFunction
 ): Promise<void> {
-    const editor = vscode.window.activeTextEditor;
     const workspaceRoot = getWorkspaceRoot();
     const cache = getCache();
     const sidecar = getSidecar();
 
-    if (!editor) {
-        vscode.window.setStatusBarMessage('LucidHover: no active editor', 3000);
-        return;
-    }
     if (!workspaceRoot || !cache || !sidecar) {
         vscode.window.setStatusBarMessage('LucidHover: indexing not ready yet', 3000);
         return;
     }
 
-    const resolved = await resolveEnclosingFunction(editor.document, editor.selection.active, workspaceRoot);
+    let resolved = target;
     if (!resolved) {
-        vscode.window.setStatusBarMessage('LucidHover: no function under the cursor', 3000);
-        return;
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            vscode.window.setStatusBarMessage('LucidHover: no active editor', 3000);
+            return;
+        }
+        resolved = await resolveEnclosingFunction(editor.document, editor.selection.active, workspaceRoot);
+        if (!resolved) {
+            vscode.window.setStatusBarMessage('LucidHover: no function under the cursor', 3000);
+            return;
+        }
     }
 
     vscode.window.setStatusBarMessage(`LucidHover: computing blast radius for ${resolved.name}...`, 3000);
@@ -219,7 +233,7 @@ export function registerShowBlastRadiusCommand(
     panel: ExplanationPanelProvider,
     output: vscode.OutputChannel
 ): vscode.Disposable {
-    return vscode.commands.registerCommand(SHOW_BLAST_RADIUS_COMMAND_ID, () =>
-        showBlastRadius(getWorkspaceRoot, getCache, getSidecar, panel, output)
+    return vscode.commands.registerCommand(SHOW_BLAST_RADIUS_COMMAND_ID, (target?: ResolvedFunction) =>
+        showBlastRadius(getWorkspaceRoot, getCache, getSidecar, panel, output, target)
     );
 }

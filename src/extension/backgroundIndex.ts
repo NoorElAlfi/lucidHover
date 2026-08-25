@@ -6,7 +6,19 @@ import { resolveAllFunctions, ResolvedFunction } from './functionResolution';
 import { generateAndCache } from './generation';
 import { SidecarManager } from './sidecar/sidecarManager';
 
-export const CANCEL_BACKGROUND_INDEX_COMMAND_ID = 'lucidhover.cancelBackgroundIndexing';
+export const TOGGLE_BACKGROUND_INDEX_COMMAND_ID = 'lucidhover.toggleBackgroundIndexing';
+
+/**
+ * Session 52: the observable lifecycle of a background-indexing pass, driving
+ * the status-bar item's text/tooltip/icon (same shape as
+ * `sidecarManager.ts`'s own status-bar-item pattern). `pausing` exists as its
+ * own state, distinct from `paused`, because cancellation here is
+ * cooperative -- an already-in-flight `generate_explanation` call (up to
+ * `GENERATE_TIMEOUT_MS`, 120s) still has to finish before the loop reaches a
+ * checkpoint that honors the token, so the status bar shouldn't claim
+ * "paused" before that's actually true.
+ */
+type BackgroundIndexPhase = 'idle' | 'running' | 'pausing' | 'paused';
 
 // Gap between generations, not a request timeout. The pass awaits each
 // generate_explanation fully before scheduling the next one (never more than
@@ -39,34 +51,121 @@ interface RankedFunction {
  */
 export class BackgroundIndexManager implements vscode.Disposable {
     private cancellationSource: vscode.CancellationTokenSource | undefined;
-    private running = false;
+    private phase: BackgroundIndexPhase = 'idle';
+    private readonly statusBarItem: vscode.StatusBarItem;
+    /**
+     * Guards `updateStatusBar()` against a stray call after `dispose()` has
+     * already torn down `statusBarItem` (Session 52, code-reviewer finding).
+     * `start()`'s `run()` is fire-and-forget (`void this.run()`, never
+     * awaited) and can be suspended at an `await` -- `waitForInteractiveIdle`,
+     * `generateAndCache`, or `delay()` -- when `dispose()` fires (extension
+     * deactivation / window close mid-pass, a real scenario, not just
+     * hypothetical). When that suspended call resumes, it still reaches
+     * `finish()` -> `updateStatusBar()`, which would otherwise touch an
+     * already-disposed `vscode.StatusBarItem`. Same guard, same rationale,
+     * as `sidecarManager.ts`'s own `disposed` flag (see its `updateStatusBar`/
+     * `log` methods, added there after an identical late-async-callback bug
+     * found in session 27).
+     */
+    private disposed = false;
 
     constructor(
         private readonly getWorkspaceRoot: () => string | undefined,
         private readonly getCache: () => ExplanationCache | undefined,
         private readonly getSidecar: () => SidecarManager | undefined,
         private readonly output: vscode.OutputChannel
-    ) {}
+    ) {
+        // Same left-aligned/priority-100/click-to-act pattern as
+        // sidecarManager.ts's own statusBarItem -- hidden while idle (nothing
+        // actionable), same "hidden until it needs to say something"
+        // convention.
+        this.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+        this.statusBarItem.command = TOGGLE_BACKGROUND_INDEX_COMMAND_ID;
+        this.updateStatusBar();
+    }
 
     start(): void {
-        if (this.running) {
+        if (this.phase === 'running') {
             return;
         }
         void this.run();
     }
 
-    cancel(): void {
-        if (this.cancellationSource) {
-            this.cancellationSource.cancel();
-            vscode.window.setStatusBarMessage('LucidHover: canceling background indexing...', 3000);
-        } else {
+    /**
+     * Thin wrapper around `start()` (Session 52) -- `start()` already treats
+     * "not currently running" uniformly whether that's because a pass never
+     * started or because the user paused a previous one, and every entry's
+     * own `cache.lookup()` inside `run()` already makes re-running skip
+     * whatever finished before the pause, so a plain re-`start()` already is
+     * a real resume, not a restart-from-scratch. Kept as its own named
+     * method purely so the pause/resume pairing is discoverable in the
+     * public API.
+     */
+    resume(): void {
+        this.start();
+    }
+
+    /** Pauses a running pass so `resume()` can pick it back up later; a no-op with a status message if nothing is running. */
+    pause(): void {
+        if (this.phase !== 'running' || !this.cancellationSource) {
             vscode.window.setStatusBarMessage('LucidHover: no background indexing running', 3000);
+            return;
+        }
+        this.phase = 'pausing';
+        this.updateStatusBar();
+        this.cancellationSource.cancel();
+        vscode.window.setStatusBarMessage('LucidHover: pausing background indexing...', 3000);
+    }
+
+    /** Status-bar item's `.command` target -- pauses a running pass, resumes a paused one, and is a no-op otherwise ('idle': nothing running; 'pausing': already mid-transition). */
+    toggle(): void {
+        if (this.phase === 'running') {
+            this.pause();
+        } else if (this.phase === 'paused') {
+            this.resume();
         }
     }
 
+    /** Exposed for tests -- the phase driving the status-bar item's current text/tooltip. */
+    getPhase(): BackgroundIndexPhase {
+        return this.phase;
+    }
+
     dispose(): void {
+        this.disposed = true;
         this.cancellationSource?.cancel();
         this.cancellationSource?.dispose();
+        this.statusBarItem.dispose();
+    }
+
+    private updateStatusBar(): void {
+        if (this.disposed) {
+            return;
+        }
+        switch (this.phase) {
+            case 'running':
+                this.statusBarItem.text = '$(sync~spin) LucidHover: indexing…';
+                this.statusBarItem.tooltip = 'Background indexing is in progress. Click to pause.';
+                this.statusBarItem.backgroundColor = undefined;
+                this.statusBarItem.show();
+                break;
+            case 'pausing':
+                this.statusBarItem.text = '$(sync~spin) LucidHover: pausing…';
+                this.statusBarItem.tooltip =
+                    'Background indexing is finishing its current function before pausing.';
+                this.statusBarItem.backgroundColor = undefined;
+                this.statusBarItem.show();
+                break;
+            case 'paused':
+                this.statusBarItem.text = '$(debug-pause) LucidHover: indexing paused';
+                this.statusBarItem.tooltip = 'Background indexing is paused. Click to resume.';
+                this.statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+                this.statusBarItem.show();
+                break;
+            case 'idle':
+                this.statusBarItem.hide();
+                break;
+        }
     }
 
     private async run(): Promise<void> {
@@ -78,7 +177,8 @@ export class BackgroundIndexManager implements vscode.Disposable {
             return;
         }
 
-        this.running = true;
+        this.phase = 'running';
+        this.updateStatusBar();
         const source = new vscode.CancellationTokenSource();
         this.cancellationSource = source;
         const token = source.token;
@@ -191,17 +291,19 @@ export class BackgroundIndexManager implements vscode.Disposable {
             await this.delay(DELAY_BETWEEN_GENERATIONS_MS, token);
         }
 
-        const status = token.isCancellationRequested ? 'canceled' : 'done';
+        const status = token.isCancellationRequested ? (this.getPhase() === 'pausing' ? 'paused' : 'canceled') : 'done';
         this.output.appendLine(
             `background-index: ${status} -- ${generated} generated, ${skipped} already cached, ${unresolved} unresolved`
         );
         this.finish(source);
     }
 
+    /** `this.phase === 'pausing'` distinguishes a user-initiated `pause()` from a plain teardown cancel (`dispose()`) -- only the former should leave the pass resumable. */
     private finish(source: vscode.CancellationTokenSource): void {
         source.dispose();
         this.cancellationSource = undefined;
-        this.running = false;
+        this.phase = this.phase === 'pausing' ? 'paused' : 'idle';
+        this.updateStatusBar();
     }
 
     private async resolveFileSymbols(workspaceRoot: string, relFile: string): Promise<ResolvedFunction[]> {
@@ -251,6 +353,6 @@ export class BackgroundIndexManager implements vscode.Disposable {
     }
 }
 
-export function registerCancelBackgroundIndexingCommand(manager: BackgroundIndexManager): vscode.Disposable {
-    return vscode.commands.registerCommand(CANCEL_BACKGROUND_INDEX_COMMAND_ID, () => manager.cancel());
+export function registerToggleBackgroundIndexingCommand(manager: BackgroundIndexManager): vscode.Disposable {
+    return vscode.commands.registerCommand(TOGGLE_BACKGROUND_INDEX_COMMAND_ID, () => manager.toggle());
 }
