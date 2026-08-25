@@ -33,9 +33,13 @@ package-lock.json
 CLAUDE.md
 codebase-explainer-vscode-extension.md
 lucidhover-current-state.md
-lucidhover-session-briefs-20-25_1.md
+lucidhover-session-briefs-*.md
+oddResponses.txt
 workflow-review.md
 docs/**
+
+# Packaging output and generated reports -- never runtime content
+dist/**
 
 # better-sqlite3 ships prebuilt binaries per platform under prebuilds/
 # (loaded directly by lib/binding.js) -- deps/ (vendored SQLite C
