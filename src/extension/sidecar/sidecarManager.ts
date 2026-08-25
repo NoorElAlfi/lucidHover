@@ -60,6 +60,36 @@ const RESTART_BACKOFF_MAX_MS = 30_000;
  */
 export type RequestPriority = 'interactive' | 'background';
 
+/**
+ * Session 53: why a (re)start attempt failed, distinguished from the caught
+ * `Error` alone -- `connectWithRetry`'s rejection looks identical
+ * (repeated `ENOENT`, see its own doc comment) whether the child process
+ * never spawned at all or is alive and simply still mid-`repo_map.index()`
+ * on a large repo, so the connect error's message/code can't tell them
+ * apart. Classification instead reads the child process's own observed
+ * state at the moment `start()` gives up:
+ *  - `'spawn-failed'`: the child's `'error'` event fired (e.g. `python` is
+ *    not on PATH) -- a real spawn-level failure, most specific and checked
+ *    first.
+ *  - `'process-crashed'`: the child spawned but has already exited (e.g. an
+ *    uncaught exception during `RepoMap.index()`) before ever reaching
+ *    `_serve_windows`/`_serve_posix`.
+ *  - `'slow-first-index'`: the child is still alive and neither of the
+ *    above fired -- matches the real session-51 incident (a large real repo
+ *    whose synchronous first index outran the old connect-retry budget),
+ *    not a crash.
+ * `'unknown'` is a defensive fallback for a state this classification
+ * doesn't expect to reach (`childProcess` unexpectedly null); the original
+ * generic message is used for it. Confirmed live (session 53) that an
+ * unreachable Ollama endpoint can NOT produce any of these -- the
+ * background embedding pass (`_embed_repo_in_background` in
+ * rpc_server.py's `main()`) starts before the socket/pipe opens and
+ * swallows `OllamaError` internally by its own explicit design ("must
+ * never crash the sidecar or block generation"), so there is no path from
+ * an unreachable Ollama into a `start()` rejection at all.
+ */
+type RecoveryFailureCause = 'spawn-failed' | 'process-crashed' | 'slow-first-index' | 'unknown';
+
 interface PendingRequest {
     resolve: (value: unknown) => void;
     reject: (err: Error) => void;
@@ -155,6 +185,18 @@ export class SidecarManager implements vscode.Disposable {
     /** True once the recovery loop has hit MAX_RESTART_ATTEMPTS and stopped
      * auto-retrying; cleared by a manual restart. */
     private givenUp = false;
+    /** Session 53: set by the current attempt's child `'error'` listener
+     * (e.g. spawn-level ENOENT when `python` isn't on PATH), reset at the
+     * start of every attempt. Previously nothing listened for this event at
+     * all -- an unhandled `'error'` on a `ChildProcess` throws, so a spawn
+     * failure risked crashing the extension host outright rather than being
+     * caught here; this doubles as the fix for that. */
+    private lastSpawnError: NodeJS.ErrnoException | null = null;
+    /** Session 53: the classified cause of the most recent failed (re)start
+     * attempt, surfaced in the status bar tooltip and give-up toast so the
+     * user gets more than a generic "could not be restarted" message.
+     * Cleared on a successful (re)start. */
+    private lastFailureCause: RecoveryFailureCause | null = null;
     /** The single in-flight recovery loop, if any -- every restart trigger
      * (heartbeat, unexpected exit, manual command, initial startup) funnels
      * through `restart()`, which de-dupes against this rather than letting
@@ -240,9 +282,34 @@ export class SidecarManager implements vscode.Disposable {
         );
         this.childProcess = child;
         this.expectedExit = false;
+        this.lastSpawnError = null;
 
         child.stdout?.on('data', (data: Buffer) => this.log(data.toString('utf8').trimEnd()));
         child.stderr?.on('data', (data: Buffer) => this.log(`[stderr] ${data.toString('utf8').trimEnd()}`));
+        // Session 53: previously unhandled -- an 'error' event with no
+        // listener throws instead of just failing quietly, so this was a
+        // real (if narrow) crash risk on top of being the one signal that
+        // distinguishes a genuine spawn failure (e.g. `python` missing from
+        // PATH) from a child that spawned fine and is just slow to listen
+        // (see `RecoveryFailureCause`'s doc comment). Recorded on `this`,
+        // not just logged, so `runRecoveryLoop`'s catch block can read it
+        // after `connectWithRetry` eventually times out.
+        //
+        // `this.childProcess !== child` guards this the same way the
+        // `exit` handler below already does -- `teardown()` kills the old
+        // child but never calls `removeAllListeners()` on it (only on the
+        // socket), so a straggler `'error'` from an already-superseded
+        // child (e.g. Node's "process could not be killed" case) could
+        // otherwise land here and silently overwrite `lastSpawnError` for
+        // whatever attempt is actually in flight (found by code-reviewer).
+        child.on('error', (err: Error) => {
+            if (this.childProcess !== child) {
+                return;
+            }
+            const errno = err as NodeJS.ErrnoException;
+            this.lastSpawnError = errno;
+            this.log(`sidecar process failed to spawn: ${errno.message}`);
+        });
         child.on('exit', (code, signal) => {
             this.log(`sidecar process exited (code=${code}, signal=${signal})`);
             // `teardown()` sets `expectedExit` right before it kills a child
@@ -582,12 +649,15 @@ export class SidecarManager implements vscode.Disposable {
                     this.restartAttempts = 0;
                     this.consecutiveFailures = 0;
                     this.givenUp = false;
+                    this.lastFailureCause = null;
                     this.updateStatusBar();
                     return true;
                 } catch (err) {
                     this.restartAttempts++;
+                    this.lastFailureCause = this.classifyStartFailure();
                     this.log(
-                        `sidecar start attempt ${this.restartAttempts}/${MAX_RESTART_ATTEMPTS} failed (${reason}): ${String(err)}`
+                        `sidecar start attempt ${this.restartAttempts}/${MAX_RESTART_ATTEMPTS} failed ` +
+                            `(${reason}, cause=${this.lastFailureCause}): ${String(err)}`
                     );
                     if (this.disposed) {
                         // `dispose()` raced with this attempt (it can call
@@ -613,6 +683,46 @@ export class SidecarManager implements vscode.Disposable {
             return false;
         } finally {
             this.restarting = false;
+        }
+    }
+
+    /**
+     * Classifies why the (re)start attempt that just failed did so, reading
+     * the current attempt's child-process state rather than the caught
+     * connect error (see `RecoveryFailureCause`'s doc comment for why the
+     * error alone can't distinguish these). Called from `runRecoveryLoop`'s
+     * catch block, immediately after `teardown()`'s next call in the loop
+     * would otherwise tear this same state down -- must run before that.
+     */
+    private classifyStartFailure(): RecoveryFailureCause {
+        if (this.lastSpawnError) {
+            return 'spawn-failed';
+        }
+        const child = this.childProcess;
+        if (!child) {
+            return 'unknown';
+        }
+        if (child.exitCode !== null || child.signalCode !== null || child.killed) {
+            return 'process-crashed';
+        }
+        return 'slow-first-index';
+    }
+
+    /** Human-readable detail for `lastFailureCause`, appended to the status
+     * bar tooltip and give-up toast (Session 53) so the user gets an actual
+     * next step instead of a one-size-fits-all message. */
+    private failureCauseDescription(): string {
+        switch (this.lastFailureCause) {
+            case 'spawn-failed':
+                return `The sidecar process itself could not be started${
+                    this.lastSpawnError ? ` (${this.lastSpawnError.message})` : ''
+                }. Check that Python is installed and on PATH.`;
+            case 'process-crashed':
+                return 'The sidecar process exited before it finished starting up. Check the LucidHover output channel for the Python error.';
+            case 'slow-first-index':
+                return 'The sidecar process is still running but has not finished indexing this workspace yet (large workspaces can take longer than the connect timeout). It may still come up if given more time.';
+            default:
+                return 'The LucidHover sidecar could not be restarted.';
         }
     }
 
@@ -653,12 +763,12 @@ export class SidecarManager implements vscode.Disposable {
         }
         if (this.givenUp) {
             this.statusBarItem.text = '$(error) LucidHover: sidecar down';
-            this.statusBarItem.tooltip = 'The LucidHover sidecar could not be restarted. Click to retry.';
+            this.statusBarItem.tooltip = `${this.failureCauseDescription()} Click to retry.`;
             this.statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');
             this.statusBarItem.show();
         } else if (this.restartAttempts > 0) {
             this.statusBarItem.text = `$(sync~spin) LucidHover: sidecar restarting (${this.restartAttempts}/${MAX_RESTART_ATTEMPTS})`;
-            this.statusBarItem.tooltip = 'The LucidHover sidecar is recovering from an unexpected exit or unresponsive state.';
+            this.statusBarItem.tooltip = this.failureCauseDescription();
             this.statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
             this.statusBarItem.show();
         } else {
@@ -674,11 +784,14 @@ export class SidecarManager implements vscode.Disposable {
         if (this.disposed) {
             return;
         }
-        this.log(`sidecar recovery gave up after ${MAX_RESTART_ATTEMPTS} attempts (${reason})`);
+        this.log(
+            `sidecar recovery gave up after ${MAX_RESTART_ATTEMPTS} attempts ` +
+                `(${reason}, cause=${this.lastFailureCause})`
+        );
         void vscode.window
             .showErrorMessage(
                 `LucidHover: the sidecar process could not be restarted after ${MAX_RESTART_ATTEMPTS} attempts. ` +
-                    'Indexing and explanation updates are paused. See the LucidHover output channel for details.',
+                    `${this.failureCauseDescription()} Indexing and explanation updates are paused.`,
                 'Restart Sidecar'
             )
             .then((choice) => {
