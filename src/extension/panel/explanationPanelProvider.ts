@@ -15,6 +15,11 @@ export const SHOW_BLAST_RADIUS_COMMAND_ID = 'lucidhover.showBlastRadius';
 // Session 46: same reasoning as SHOW_BLAST_RADIUS_COMMAND_ID above -- owned
 // here so callTraceCommand.ts can import it without a circular import.
 export const SHOW_CALL_TRACE_COMMAND_ID = 'lucidhover.traceExecutionPath';
+// Session 55: same reasoning again -- owned here (moved from
+// refreshExplanationCommand.ts, which already imports this file for
+// `ExplanationPanelProvider`) so the panel's new "Regenerate" button can
+// forward its tracked `currentFunction` without a circular import.
+export const REFRESH_COMMAND_ID = 'lucidhover.refreshExplanation';
 const NAVIGATE_COMMAND_ID = 'lucidhover.navigateToFunction';
 
 interface ExplanationFields {
@@ -183,6 +188,10 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
                 void vscode.commands.executeCommand(SHOW_BLAST_RADIUS_COMMAND_ID, this.currentFunction);
             } else if (message?.type === 'traceExecutionPath') {
                 void vscode.commands.executeCommand(SHOW_CALL_TRACE_COMMAND_ID, this.currentFunction);
+            } else if (message?.type === 'regenerate') {
+                void vscode.commands.executeCommand(REFRESH_COMMAND_ID, this.currentFunction);
+            } else if (message?.type === 'copy' && typeof (message as { text?: unknown }).text === 'string') {
+                void vscode.env.clipboard.writeText((message as { text: string }).text);
             } else if (message?.type === 'back') {
                 this.pinned = false;
                 this.refreshFromActiveEditor();
@@ -309,6 +318,7 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
             type: 'render',
             fnName: fnNameFromFnId(row.fn_id),
             explanation,
+            generatedAt: row.generated_at,
         });
     }
 
@@ -408,6 +418,11 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
     .branch-toggle .graph-node {
         margin: 8px 0 0 0;
     }
+    .timestamp {
+        color: var(--vscode-descriptionForeground);
+        font-size: 0.85em;
+        margin-bottom: 8px;
+    }
     .disclaimer {
         color: var(--vscode-descriptionForeground);
         font-size: 0.85em;
@@ -469,6 +484,55 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
         content.appendChild(ul);
     }
 
+    // Session 55: plain relative-time text ("generated 3 days ago") for the
+    // single-explanation view's generated_at timestamp -- coarse buckets
+    // are enough here, no need for a library.
+    function relativeTime(isoString) {
+        const then = new Date(isoString).getTime();
+        if (Number.isNaN(then)) {
+            return null;
+        }
+        const seconds = Math.max(0, Math.round((Date.now() - then) / 1000));
+        const units = [
+            ['year', 31536000],
+            ['month', 2592000],
+            ['day', 86400],
+            ['hour', 3600],
+            ['minute', 60],
+        ];
+        for (const [name, secondsPerUnit] of units) {
+            const value = Math.floor(seconds / secondsPerUnit);
+            if (value >= 1) {
+                return 'generated ' + value + ' ' + name + (value === 1 ? '' : 's') + ' ago';
+            }
+        }
+        return 'generated just now';
+    }
+
+    // Session 55: plain-text rendering of the currently-displayed explanation
+    // for the "Copy" button -- mirrors renderExplanation's own section order
+    // and its "omit empty fields" rule, so the copied text matches what's on
+    // screen.
+    function explanationAsText(fnName, explanation) {
+        const lines = [fnName];
+        if (explanation.why_it_exists) {
+            lines.push('', 'Why it exists:', explanation.why_it_exists);
+        }
+        if (Array.isArray(explanation.used_by) && explanation.used_by.length > 0) {
+            lines.push('', 'Used by:', explanation.used_by.join(', '));
+        }
+        if (Array.isArray(explanation.calls) && explanation.calls.length > 0) {
+            lines.push('', 'Calls:', explanation.calls.join(', '));
+        }
+        if (Array.isArray(explanation.side_effects) && explanation.side_effects.length > 0) {
+            lines.push('', 'Side effects:', explanation.side_effects.map((s) => '- ' + s).join('\\n'));
+        }
+        if (explanation.risk_note) {
+            lines.push('', 'Risk:', explanation.risk_note);
+        }
+        return lines.join('\\n');
+    }
+
     function renderEmpty(fnName) {
         clear();
         const p = document.createElement('p');
@@ -479,11 +543,16 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
         content.appendChild(p);
     }
 
-    function renderExplanation(fnName, explanation) {
+    function renderExplanation(fnName, explanation, generatedAt) {
         clear();
         const h = document.createElement('h3');
         h.textContent = fnName;
         content.appendChild(h);
+
+        const relTime = typeof generatedAt === 'string' ? relativeTime(generatedAt) : null;
+        if (relTime) {
+            addParagraph(relTime, 'timestamp');
+        }
 
         // Empty/null fields render as nothing -- omit the whole section,
         // never a placeholder like "N/A" (silence means confirmed-none).
@@ -509,6 +578,20 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
             vscode.postMessage({ type: 'traceExecutionPath' });
         });
         content.appendChild(traceBtn);
+        const regenerateBtn = document.createElement('button');
+        regenerateBtn.className = 'name-link';
+        regenerateBtn.textContent = 'Regenerate ↻';
+        regenerateBtn.addEventListener('click', () => {
+            vscode.postMessage({ type: 'regenerate' });
+        });
+        content.appendChild(regenerateBtn);
+        const copyBtn = document.createElement('button');
+        copyBtn.className = 'name-link';
+        copyBtn.textContent = 'Copy';
+        copyBtn.addEventListener('click', () => {
+            vscode.postMessage({ type: 'copy', text: explanationAsText(fnName, explanation) });
+        });
+        content.appendChild(copyBtn);
         if (Array.isArray(explanation.calls) && explanation.calls.length > 0) {
             addSection('Calls');
             addNameLinks(explanation.calls);
@@ -685,7 +768,7 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
     window.addEventListener('message', (event) => {
         const message = event.data;
         if (message.type === 'render') {
-            renderExplanation(message.fnName, message.explanation);
+            renderExplanation(message.fnName, message.explanation, message.generatedAt);
         } else if (message.type === 'empty') {
             renderEmpty(message.fnName);
         } else if (message.type === 'renderGraph') {
