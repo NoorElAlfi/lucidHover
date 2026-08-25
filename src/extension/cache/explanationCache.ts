@@ -44,6 +44,7 @@ export class ExplanationCache {
     private readonly writeStmt;
     private readonly deleteByCacheKeyStmt;
     private readonly purgeSupersededStmt;
+    private readonly listCurrentRowsStmt;
 
     // No `vscode` dependency here (deliberate -- this class only needs
     // better-sqlite3, see the class doc comment), so this is a plain listener
@@ -156,6 +157,33 @@ export class ExplanationCache {
                 WHERE rn = 1
             )
         `);
+
+        // Session 56 ("Search Explanations"): the whole-table analogue of
+        // `currentRowForFnIdStmt` above -- same "current row" definition
+        // (per fn_id, greatest `generated_at` then `rowid` as the tiebreaker,
+        // both statements' reasons for existing), just returning every fn_id's
+        // current row in one query instead of looking up a single known
+        // fn_id. Filters to the live model/embedding/prompt tuple both in the
+        // window function's own partition and in the outer WHERE, so a row
+        // orphaned by e.g. a `PROMPT_VERSION` bump (which `currentRowForFnIdStmt`
+        // already can't see past -- see that field's own doc comment) is
+        // excluded entirely rather than surfacing as a stale search result.
+        this.listCurrentRowsStmt = this.db.prepare(`
+            SELECT * FROM explanation_cache
+            WHERE model_id = ? AND embedding_model_id = ? AND prompt_version = ?
+            AND cache_key IN (
+                SELECT cache_key FROM (
+                    SELECT cache_key,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY fn_id
+                               ORDER BY generated_at DESC, rowid DESC
+                           ) AS rn
+                    FROM explanation_cache
+                    WHERE model_id = ? AND embedding_model_id = ? AND prompt_version = ?
+                )
+                WHERE rn = 1
+            )
+        `);
     }
 
     lookup(params: CacheLookupParams): CacheRow | undefined {
@@ -249,6 +277,22 @@ export class ExplanationCache {
      */
     purgeSupersededRows(): number {
         return this.purgeSupersededStmt.run().changes as number;
+    }
+
+    /**
+     * Every fn_id's current row (Session 56, "Search Explanations") under the
+     * given model/embedding/prompt tuple -- see `listCurrentRowsStmt`'s doc
+     * comment for the exact definition. Read-only; never touches rows.
+     */
+    listCurrentRows(params: { modelId: string; embeddingModelId: string; promptVersion: string }): CacheRow[] {
+        return this.listCurrentRowsStmt.all(
+            params.modelId,
+            params.embeddingModelId,
+            params.promptVersion,
+            params.modelId,
+            params.embeddingModelId,
+            params.promptVersion
+        ) as CacheRow[];
     }
 
     /** Fires after every write (regenerate or first-generate), whatever the caller. */
