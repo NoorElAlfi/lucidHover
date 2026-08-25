@@ -18,6 +18,7 @@ export interface FakeChildProcess extends EventEmitter {
     stdout: EventEmitter;
     stderr: EventEmitter;
     exitCode: number | null;
+    signalCode: string | null;
     killed: boolean;
     kill: sinon.SinonStub;
 }
@@ -27,6 +28,7 @@ export function createFakeChildProcess(): FakeChildProcess {
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
     child.exitCode = null;
+    child.signalCode = null;
     child.killed = false;
     child.kill = sinon.stub().callsFake(() => {
         child.killed = true;

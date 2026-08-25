@@ -221,4 +221,132 @@ suite('sidecar/SidecarManager (crash recovery)', () => {
             assert.strictEqual(spawnStub.callCount, 6, 'the manual restart spawns one more attempt');
         }
     );
+
+    /**
+     * Session 53: `connectWithRetry`'s rejection is identical (repeated
+     * `ENOENT`) whether the child never spawned, crashed before listening,
+     * or is alive and simply still indexing a large repo -- these three
+     * tests drive each real, distinguishable child-process state directly
+     * and check `classifyStartFailure()`/`failureCauseDescription()`
+     * (private, accessed the same cast-to-internals way the rest of this
+     * suite already does) without paying the full multi-attempt backoff
+     * cost `manager.restart()` would incur, since classification doesn't
+     * depend on how many attempts have run.
+     */
+    suite('recovery failure classification', () => {
+        function internals(m: SidecarManager) {
+            return m as unknown as {
+                classifyStartFailure: () => string;
+                failureCauseDescription: () => string;
+                lastSpawnError: NodeJS.ErrnoException | null;
+                lastFailureCause: string | null;
+            };
+        }
+
+        // `failureCauseDescription()` reads the cached `lastFailureCause`
+        // field rather than re-classifying -- production always assigns it
+        // right before reading it (`runRecoveryLoop`'s
+        // `this.lastFailureCause = this.classifyStartFailure()`, immediately
+        // followed by `updateStatusBar()`/`notifyGaveUp()`). These tests
+        // call `start()` directly (bypassing `runRecoveryLoop` entirely, to
+        // avoid its multi-attempt backoff cost), so they must reproduce that
+        // same assignment themselves before checking the description.
+        function classifyAndDescribe(m: SidecarManager): { cause: string; description: string } {
+            const i = internals(m);
+            const cause = i.classifyStartFailure();
+            i.lastFailureCause = cause;
+            return { cause, description: i.failureCauseDescription() };
+        }
+
+        test('a child "error" event (e.g. python missing from PATH) classifies as spawn-failed', async () => {
+            const fakeChildren: FakeChildProcess[] = [];
+            spawnStub.callsFake(() => {
+                const child = createFakeChildProcess();
+                fakeChildren.push(child);
+                process.nextTick(() => {
+                    const err = Object.assign(new Error('spawn python ENOENT'), { code: 'ENOENT' });
+                    child.emit('error', err);
+                });
+                return child as unknown as cp.ChildProcess;
+            });
+            stubConnectAlwaysFails(connectStub);
+
+            manager = makeManager(output, spawnStub, connectStub);
+            await assert.rejects(() => manager!.start());
+
+            const { cause, description } = classifyAndDescribe(manager);
+            assert.strictEqual(cause, 'spawn-failed');
+            assert.ok(internals(manager).lastSpawnError, 'the spawn error should be captured, not left unhandled');
+            assert.match(description, /Python is installed and on PATH/);
+        });
+
+        test('a child that already exited before listening classifies as process-crashed', async () => {
+            const fakeChildren: FakeChildProcess[] = [];
+            spawnStub.callsFake(() => {
+                const child = createFakeChildProcess();
+                fakeChildren.push(child);
+                return child as unknown as cp.ChildProcess;
+            });
+            stubConnectAlwaysFails(connectStub);
+
+            manager = makeManager(output, spawnStub, connectStub);
+            const startPromise = manager.start();
+            // Set the exit state directly rather than emitting 'exit' --
+            // emitting would also fire `start()`'s own exit handler, which
+            // would trigger a second, unrelated recovery loop racing this
+            // one (see that handler's own doc comment). Real
+            // `child_process.ChildProcess` sets `exitCode` before emitting
+            // 'exit' regardless, so this reproduces the same observed state
+            // `classifyStartFailure()` reads without the cascade.
+            fakeChildren[0].exitCode = 1;
+            await assert.rejects(() => startPromise);
+
+            const { cause, description } = classifyAndDescribe(manager);
+            assert.strictEqual(cause, 'process-crashed');
+            assert.match(description, /exited before it finished starting up/);
+        });
+
+        test('a still-alive child that never opened the socket classifies as slow-first-index, not a crash', async () => {
+            spawnStub.callsFake(() => createFakeChildProcess() as unknown as cp.ChildProcess);
+            stubConnectAlwaysFails(connectStub);
+
+            manager = makeManager(output, spawnStub, connectStub);
+            await assert.rejects(() => manager!.start());
+
+            const { cause, description } = classifyAndDescribe(manager);
+            assert.strictEqual(cause, 'slow-first-index');
+            assert.match(description, /has not finished indexing this workspace yet/);
+        });
+    });
+
+    test(
+        'give-up toast and status bar reflect a genuine spawn failure with a specific message, not the generic one',
+        async function () {
+            this.timeout(90_000); // real backoff delays (up to ~54s) -- see the pre-existing give-up test above
+
+            spawnStub.callsFake(() => {
+                const child = createFakeChildProcess();
+                process.nextTick(() => {
+                    const err = Object.assign(new Error('spawn python ENOENT'), { code: 'ENOENT' });
+                    child.emit('error', err);
+                });
+                return child as unknown as cp.ChildProcess;
+            });
+            stubConnectAlwaysFails(connectStub);
+
+            manager = makeManager(output, spawnStub, connectStub);
+            const gaveUp = await manager.restart('test spawn failure loop');
+
+            assert.strictEqual(gaveUp, false);
+            assert.strictEqual(spawnStub.callCount, 5);
+            assert.strictEqual(showErrorMessageStub.callCount, 1);
+
+            const toastMessage = showErrorMessageStub.firstCall.args[0] as string;
+            assert.match(toastMessage, /Python is installed and on PATH/);
+            assert.match(
+                (manager as unknown as { statusBarItem: vscode.StatusBarItem }).statusBarItem.tooltip as string,
+                /Python is installed and on PATH/
+            );
+        }
+    );
 });
