@@ -227,4 +227,31 @@ suite('panel/callTraceCommand (Session 46, real sidecar, no Ollama needed -- gra
             'call trace must never trigger generation to fill an uncached node in (Core Rule 4/9)'
         );
     });
+
+    test('an explicit target overrides the live cursor position (Session 52 fix)', async function () {
+        this.timeout(20_000);
+
+        // Cursor sits on q() (a leaf, no callees), but an explicit `target`
+        // for root() is passed in -- this is exactly what
+        // ExplanationPanelProvider now does when its own tracked
+        // `currentFunction` differs from wherever the text cursor has since
+        // moved to. The computed trace must be from the explicit target, not
+        // the live cursor.
+        const qDocument = await vscode.workspace.openTextDocument(path.join(tempDir, 'q.js'));
+        const editor = await vscode.window.showTextDocument(qDocument);
+        const qResolved = await resolveEnclosingFunction(qDocument, new vscode.Position(0, 10), tempDir);
+        assert.ok(qResolved, 'expected to resolve q()');
+        editor.selection = new vscode.Selection(qResolved!.range.start, qResolved!.range.start);
+
+        const rootDocument = await vscode.workspace.openTextDocument(path.join(tempDir, 'root.js'));
+        const rootResolved = await resolveEnclosingFunction(rootDocument, new vscode.Position(0, 10), tempDir);
+        assert.ok(rootResolved, 'expected to resolve root()');
+
+        const showGraphSpy = sandbox.stub(panel, 'showGraph');
+        await showCallTrace(() => tempDir, () => cache, () => sidecar, panel, output, rootResolved);
+
+        assert.strictEqual(showGraphSpy.calledOnce, true);
+        const payload = showGraphSpy.firstCall.args[0] as GraphViewPayload;
+        assert.strictEqual(payload.rootName, 'root', 'expected the trace to start from the explicit target, not the live cursor at q()');
+    });
 });

@@ -1,7 +1,7 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { BackgroundFlushManager } from './backgroundFlush';
-import { BackgroundIndexManager, registerCancelBackgroundIndexingCommand } from './backgroundIndex';
+import { BackgroundIndexManager, registerToggleBackgroundIndexingCommand } from './backgroundIndex';
 import { DEFAULT_OLLAMA_ENDPOINT, EMBEDDING_MODEL_ID, resolveOllamaEndpoint } from './cache/config';
 import { ExplanationCache } from './cache/explanationCache';
 import { RoleCodeLensProvider } from './codelens/roleCodeLensProvider';
@@ -303,7 +303,7 @@ export function activate(context: vscode.ExtensionContext): void {
         output
     );
     context.subscriptions.push(backgroundIndexManager);
-    context.subscriptions.push(registerCancelBackgroundIndexingCommand(backgroundIndexManager));
+    context.subscriptions.push(registerToggleBackgroundIndexingCommand(backgroundIndexManager));
 
     // Build Order step 14: `lucidHover.ollamaEndpoint` is spawn-time config
     // (see cache/config.ts's `resolveOllamaEndpoint` doc), so a user editing

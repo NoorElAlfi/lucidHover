@@ -198,32 +198,43 @@ function toGraphViewEdges(edges: readonly RawCallTraceEdge[]): GraphViewEdge[] {
  * rather than through the global command registry, since `extension.ts`'s
  * own activation already registers the real command id once in the
  * Extension Development Host every integration test runs inside.
+ *
+ * `target` (Session 52): identical role and rationale as
+ * `showBlastRadius`'s own `target` param -- see that doc comment. Passed by
+ * `ExplanationPanelProvider` as its tracked `currentFunction` when the
+ * webview's "Trace execution from here →" button fires, so the trace
+ * targets whatever the panel is actually showing rather than the live
+ * cursor position.
  */
 export async function showCallTrace(
     getWorkspaceRoot: () => string | undefined,
     getCache: () => ExplanationCache | undefined,
     getSidecar: () => SidecarManager | undefined,
     panel: ExplanationPanelProvider,
-    output: vscode.OutputChannel
+    output: vscode.OutputChannel,
+    target?: ResolvedFunction
 ): Promise<void> {
-    const editor = vscode.window.activeTextEditor;
     const workspaceRoot = getWorkspaceRoot();
     const cache = getCache();
     const sidecar = getSidecar();
 
-    if (!editor) {
-        vscode.window.setStatusBarMessage('LucidHover: no active editor', 3000);
-        return;
-    }
     if (!workspaceRoot || !cache || !sidecar) {
         vscode.window.setStatusBarMessage('LucidHover: indexing not ready yet', 3000);
         return;
     }
 
-    const resolved = await resolveEnclosingFunction(editor.document, editor.selection.active, workspaceRoot);
+    let resolved = target;
     if (!resolved) {
-        vscode.window.setStatusBarMessage('LucidHover: no function under the cursor', 3000);
-        return;
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            vscode.window.setStatusBarMessage('LucidHover: no active editor', 3000);
+            return;
+        }
+        resolved = await resolveEnclosingFunction(editor.document, editor.selection.active, workspaceRoot);
+        if (!resolved) {
+            vscode.window.setStatusBarMessage('LucidHover: no function under the cursor', 3000);
+            return;
+        }
     }
 
     vscode.window.setStatusBarMessage(`LucidHover: tracing execution from ${resolved.name}...`, 3000);
@@ -266,7 +277,7 @@ export function registerShowCallTraceCommand(
     panel: ExplanationPanelProvider,
     output: vscode.OutputChannel
 ): vscode.Disposable {
-    return vscode.commands.registerCommand(SHOW_CALL_TRACE_COMMAND_ID, () =>
-        showCallTrace(getWorkspaceRoot, getCache, getSidecar, panel, output)
+    return vscode.commands.registerCommand(SHOW_CALL_TRACE_COMMAND_ID, (target?: ResolvedFunction) =>
+        showCallTrace(getWorkspaceRoot, getCache, getSidecar, panel, output, target)
     );
 }

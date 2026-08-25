@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { ExplanationCache, CacheRow } from '../cache/explanationCache';
 import { EMBEDDING_MODEL_ID, PROMPT_VERSION, resolveModelId } from '../cache/config';
-import { resolveEnclosingFunction } from '../functionResolution';
+import { resolveEnclosingFunction, ResolvedFunction } from '../functionResolution';
 import { isSupportedLanguageId } from '../languages';
 import { SidecarManager } from '../sidecar/sidecarManager';
 
@@ -143,6 +143,19 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
     private pendingRow: CacheRow | undefined;
     private pendingGraph: GraphViewPayload | undefined;
     /**
+     * Session 52: the function whose explanation is currently rendered via
+     * `postRow` (cursor-synced only -- `showRow`'s explicit push from
+     * hover's "Show more" link has no `ResolvedFunction` to offer, only a
+     * bare `CacheRow`, so it clears this instead of guessing). Read by the
+     * webview's `showBlastRadius`/`traceExecutionPath` message handlers so
+     * those commands target whatever the panel is actually showing, not
+     * wherever the text cursor has since moved to -- fixes a real bug where
+     * clicking "See full blast radius" after moving the cursor away (or off
+     * any function) silently computed the graph for the wrong function, or
+     * for nothing at all.
+     */
+    private currentFunction: ResolvedFunction | undefined;
+    /**
      * Session 45: true while a graph view (blast radius, and later session
      * 46's execution trace) is pinned -- cursor movement must not overwrite
      * it, unlike the normal cursor-synced explanation view. Cleared only by
@@ -167,9 +180,9 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
             if (message?.type === 'navigate' && message.name) {
                 void vscode.commands.executeCommand(NAVIGATE_COMMAND_ID, message.name);
             } else if (message?.type === 'showBlastRadius') {
-                void vscode.commands.executeCommand(SHOW_BLAST_RADIUS_COMMAND_ID);
+                void vscode.commands.executeCommand(SHOW_BLAST_RADIUS_COMMAND_ID, this.currentFunction);
             } else if (message?.type === 'traceExecutionPath') {
-                void vscode.commands.executeCommand(SHOW_CALL_TRACE_COMMAND_ID);
+                void vscode.commands.executeCommand(SHOW_CALL_TRACE_COMMAND_ID, this.currentFunction);
             } else if (message?.type === 'back') {
                 this.pinned = false;
                 this.refreshFromActiveEditor();
@@ -205,6 +218,11 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
      */
     showRow(row: CacheRow): void {
         this.pinned = false;
+        // No ResolvedFunction to offer here (see `currentFunction`'s doc
+        // comment) -- the blast-radius/trace buttons fall back to live-
+        // cursor resolution for a row pushed this way, same as an explicit
+        // Command Palette invocation.
+        this.currentFunction = undefined;
         if (this.view) {
             this.postRow(row);
         } else {
@@ -252,12 +270,14 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
         const workspaceRoot = this.getWorkspaceRoot();
         const cache = this.getCache();
         if (!this.view || !workspaceRoot || !cache || !editor || !isSupportedLanguageId(editor.document.languageId)) {
+            this.currentFunction = undefined;
             this.postEmpty();
             return;
         }
 
         const resolved = await resolveEnclosingFunction(editor.document, editor.selection.active, workspaceRoot);
         if (!resolved) {
+            this.currentFunction = undefined;
             this.postEmpty();
             return;
         }
@@ -272,9 +292,11 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
         });
 
         if (!row) {
+            this.currentFunction = undefined;
             this.postEmpty(resolved.name);
             return;
         }
+        this.currentFunction = resolved;
         this.postRow(row);
     }
 
@@ -386,6 +408,14 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
     .branch-toggle .graph-node {
         margin: 8px 0 0 0;
     }
+    .disclaimer {
+        color: var(--vscode-descriptionForeground);
+        font-size: 0.85em;
+        font-style: italic;
+        margin-top: 16px;
+        padding-top: 8px;
+        border-top: 1px solid var(--vscode-widget-border, transparent);
+    }
 </style>
 </head>
 <body>
@@ -491,6 +521,14 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
             addSection('Risk');
             addParagraph(explanation.risk_note, 'risk-note');
         }
+        // Session 52: persistent disclaimer -- every field above came from a
+        // local LLM call (Core Rule 1), not a static analyzer, so it can be
+        // wrong. Scoped to this single-explanation view only, not the graph
+        // views (renderGraph/renderTrace): those already show many nodes'
+        // explanations at once as compact one-line summaries, not a single
+        // reading pane, so a repeated per-node disclaimer would be noise
+        // rather than a one-time notice.
+        addParagraph('Generated by a local LLM — may be inaccurate, verify before relying on it.', 'disclaimer');
     }
 
     function addBackLink() {

@@ -84,3 +84,52 @@ export function stubConnectAlwaysFails(netConnectStub: sinon.SinonStub): FakeSoc
     });
     return sockets;
 }
+
+/**
+ * Minimal stand-in for `vscode.WebviewView`, covering only what
+ * `ExplanationPanelProvider.resolveWebviewView` touches (Session 52). Real
+ * `vscode.WebviewView` has many more members (title/description/badge/
+ * show()/etc); this fake only implements what production code actually
+ * reads or calls, cast `as unknown as vscode.WebviewView` at the call site
+ * -- same "fake the shape actually used, not the whole interface" approach
+ * as `createFakeChildProcess`/`createFakeSocket` above.
+ *
+ * `simulateMessageFromWebview` lets a test stand in for the webview's own
+ * in-page script calling `vscode.postMessage(...)`, without needing to
+ * actually execute JS inside a real rendered webview iframe (which this
+ * test harness has no access to).
+ */
+export interface FakeWebviewView {
+    webview: {
+        options: unknown;
+        html: string;
+        postMessage: sinon.SinonStub;
+        onDidReceiveMessage: sinon.SinonStub;
+    };
+    visible: boolean;
+    onDidChangeVisibility: sinon.SinonStub;
+    onDidDispose: sinon.SinonStub;
+    simulateMessageFromWebview: (message: unknown) => void;
+}
+
+export function createFakeWebviewView(): FakeWebviewView {
+    let receiveListener: ((message: unknown) => void) | undefined;
+    const fake: FakeWebviewView = {
+        webview: {
+            options: undefined,
+            html: '',
+            postMessage: sinon.stub().resolves(true),
+            onDidReceiveMessage: sinon.stub().callsFake((listener: (message: unknown) => void) => {
+                receiveListener = listener;
+                return { dispose: () => {} };
+            }),
+        },
+        visible: true,
+        onDidChangeVisibility: sinon.stub().returns({ dispose: () => {} }),
+        onDidDispose: sinon.stub().returns({ dispose: () => {} }),
+        simulateMessageFromWebview: (message: unknown) => {
+            receiveListener?.(message);
+        },
+    };
+    return fake;
+}

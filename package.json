@@ -52,8 +52,8 @@
         "title": "LucidHover: Refresh Explanation for Function Under Cursor"
       },
       {
-        "command": "lucidhover.cancelBackgroundIndexing",
-        "title": "LucidHover: Cancel Background Indexing"
+        "command": "lucidhover.toggleBackgroundIndexing",
+        "title": "LucidHover: Toggle Background Indexing (Pause/Resume)"
       },
       {
         "command": "lucidhover.installGitHooks",
