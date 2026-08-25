@@ -22,7 +22,9 @@ import { registerPrioritizeFileIndexingCommand } from './prioritizeFileIndexingC
 import { registerPurgeSupersededCacheCommand } from './purgeSupersededCacheCommand';
 import { registerRefreshExplanationCommand } from './refreshExplanationCommand';
 import { SaveReindexManager } from './saveReindex';
+import { registerSearchExplanationsCommand } from './searchExplanationsCommand';
 import { SidecarManager } from './sidecar/sidecarManager';
+import { registerShowMostImportantFunctionsCommand } from './showMostImportantFunctionsCommand';
 import { StaleTracker } from './staleTracking';
 import { registerGenerateSummaryDocsCommand } from './summaryDocGenerator';
 import { isWorkspaceTrusted, onDidGrantWorkspaceTrust } from './trust';
@@ -315,6 +317,28 @@ export function activate(context: vscode.ExtensionContext): void {
             () => indexedWorkspaceRoot,
             () => explanationCache ?? undefined,
             () => sidecarManager ?? undefined,
+            output
+        )
+    );
+
+    // "Finding things" commands (Session 56) -- registered unconditionally
+    // (Core Rule 6, same pattern as the other commands above); both are
+    // no-ops with a status message until indexing has actually started under
+    // trust. Neither generates: "Show Most Important Functions" reads the
+    // sidecar's already-computed PageRank ranking, "Search Explanations" is a
+    // pure cache read (Core Rule 4/9).
+    context.subscriptions.push(
+        registerShowMostImportantFunctionsCommand(
+            () => indexedWorkspaceRoot,
+            () => explanationCache ?? undefined,
+            () => sidecarManager ?? undefined,
+            output
+        )
+    );
+    context.subscriptions.push(
+        registerSearchExplanationsCommand(
+            () => indexedWorkspaceRoot,
+            () => explanationCache ?? undefined,
             output
         )
     );

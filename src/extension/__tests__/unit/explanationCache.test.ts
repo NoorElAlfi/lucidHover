@@ -367,6 +367,45 @@ describe('cache/explanationCache', () => {
         });
     });
 
+    describe('listCurrentRows (Session 56, "Search Explanations")', () => {
+        const tuple = { modelId: 'qwen2.5-coder:1.5b', embeddingModelId: 'all-minilm', promptVersion: 'few-shot-v3' };
+
+        it('returns an empty array against an empty cache', () => {
+            assert.deepStrictEqual(cache.listCurrentRows(tuple), []);
+        });
+
+        it('excludes superseded rows for a function with more than one cached generation', () => {
+            const older = makeRow({ cache_key: 'key-old', fn_hash: 'fnhash-old', generated_at: '2026-08-19T00:00:00.000Z' });
+            const newer = makeRow({ cache_key: 'key-new', fn_hash: 'fnhash-new', generated_at: '2026-08-20T00:00:00.000Z' });
+            cache.write(older, false);
+            cache.write(newer, false);
+
+            const rows = cache.listCurrentRows(tuple);
+            assert.strictEqual(rows.length, 1);
+            assert.strictEqual(rows[0].cache_key, 'key-new');
+        });
+
+        it('returns one row per distinct fn_id', () => {
+            cache.write(makeRow({ cache_key: 'a1', fn_id: 'a.js::foo::1' }));
+            cache.write(makeRow({ cache_key: 'b1', fn_id: 'a.js::bar::1' }));
+
+            const rows = cache.listCurrentRows(tuple);
+            assert.deepStrictEqual(
+                rows.map((r) => r.cache_key).sort(),
+                ['a1', 'b1']
+            );
+        });
+
+        it('excludes rows from a different model/embedding/prompt tuple', () => {
+            cache.write(makeRow({ cache_key: 'v3', prompt_version: 'few-shot-v3' }));
+            cache.write(makeRow({ cache_key: 'v4', fn_id: 'a.js::foo::1', prompt_version: 'few-shot-v4', generated_at: '2026-08-21T00:00:00.000Z' }));
+
+            const rows = cache.listCurrentRows(tuple);
+            assert.strictEqual(rows.length, 1);
+            assert.strictEqual(rows[0].cache_key, 'v3');
+        });
+    });
+
     describe('onDidWrite listeners (Session 10)', () => {
         it('fires with the written row on every write', () => {
             const seen: CacheRow[] = [];

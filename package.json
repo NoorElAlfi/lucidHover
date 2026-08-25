@@ -82,6 +82,14 @@
       {
         "command": "lucidhover.prioritizeFileIndexing",
         "title": "LucidHover: Prioritize Indexing for This File"
+      },
+      {
+        "command": "lucidhover.showMostImportantFunctions",
+        "title": "LucidHover: Show Most Important Functions"
+      },
+      {
+        "command": "lucidhover.searchExplanations",
+        "title": "LucidHover: Search Explanations"
       }
     ],
     "menus": {
