@@ -48,10 +48,19 @@ function parseFnId(fnId: string): { relFname: string; qualifiedName: string } {
  * sidecar's bare tree-sitter coordinates -- a cache row's `fn_id` already
  * came from this same extension host's own `computeFnId`, so it either
  * matches exactly or the function has moved/been removed since).
+ *
+ * `refreshPanel` (found by session 58's code-reviewer pass, fixed here): the
+ * same explicit-refresh-after-setting-selection fix session 58 applied to
+ * `navigateToFunction`/`navigateToLocation` in explanationPanelProvider.ts --
+ * `onDidChangeTextEditorSelection` doesn't fire when the selection this
+ * function sets already matches what the editor had, so the docked panel's
+ * cursor-sync refresh can't be relied on alone after picking a function whose
+ * location the cursor was already at (or had recently visited).
  */
 export async function searchExplanations(
     getWorkspaceRoot: () => string | undefined,
     getCache: () => ExplanationCache | undefined,
+    refreshPanel: () => void,
     output: vscode.OutputChannel
 ): Promise<void> {
     const workspaceRoot = getWorkspaceRoot();
@@ -110,14 +119,16 @@ export async function searchExplanations(
     const position = match.range.start;
     editor.selection = new vscode.Selection(position, position);
     editor.revealRange(match.range, vscode.TextEditorRevealType.InCenter);
+    refreshPanel();
 }
 
 export function registerSearchExplanationsCommand(
     getWorkspaceRoot: () => string | undefined,
     getCache: () => ExplanationCache | undefined,
+    refreshPanel: () => void,
     output: vscode.OutputChannel
 ): vscode.Disposable {
     return vscode.commands.registerCommand(SEARCH_EXPLANATIONS_COMMAND_ID, () =>
-        searchExplanations(getWorkspaceRoot, getCache, output)
+        searchExplanations(getWorkspaceRoot, getCache, refreshPanel, output)
     );
 }

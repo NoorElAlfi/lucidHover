@@ -336,6 +336,7 @@ export function activate(context: vscode.ExtensionContext): void {
             () => indexedWorkspaceRoot,
             () => explanationCache ?? undefined,
             () => sidecarManager ?? undefined,
+            () => panelProvider.refreshNow(),
             output
         )
     );
@@ -343,6 +344,7 @@ export function activate(context: vscode.ExtensionContext): void {
         registerSearchExplanationsCommand(
             () => indexedWorkspaceRoot,
             () => explanationCache ?? undefined,
+            () => panelProvider.refreshNow(),
             output
         )
     );

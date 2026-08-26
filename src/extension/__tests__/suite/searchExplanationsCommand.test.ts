@@ -112,7 +112,7 @@ suite('searchExplanationsCommand (Session 56)', () => {
 
         const quickPickStub = sandbox.stub(vscode.window, 'showQuickPick').resolves(undefined);
 
-        await searchExplanations(() => tempDir, () => cache, output);
+        await searchExplanations(() => tempDir, () => cache, sinon.stub(), output);
 
         assert.strictEqual(quickPickStub.calledOnce, true);
         const items = (await quickPickStub.firstCall.args[0]) as vscode.QuickPickItem[];
@@ -135,12 +135,19 @@ suite('searchExplanationsCommand (Session 56)', () => {
             return resolved.find((i) => i.label === 'b');
         });
 
-        await searchExplanations(() => tempDir, () => cache, output);
+        const refreshPanel = sinon.stub();
+        await searchExplanations(() => tempDir, () => cache, refreshPanel, output);
 
         const editor = vscode.window.activeTextEditor;
         assert.ok(editor, 'expected an editor to be opened for the picked function');
         assert.strictEqual(path.basename(editor!.document.uri.fsPath), 'file.js');
         assert.strictEqual(editor!.selection.active.line, b!.range.start.line);
+
+        // Session 58 code-reviewer finding, fixed here: same
+        // explicit-refresh-after-navigating fix as
+        // showMostImportantFunctionsCommand.ts -- see that suite's identical
+        // assertion for the full rationale.
+        assert.strictEqual(refreshPanel.calledOnce, true, 'expected refreshPanel to be called exactly once after navigating to the pick');
     });
 
     test('does nothing when the quick pick is cancelled (returns undefined)', async function () {
@@ -154,26 +161,28 @@ suite('searchExplanationsCommand (Session 56)', () => {
 
         sandbox.stub(vscode.window, 'showQuickPick').resolves(undefined);
         const showTextDocumentSpy = sandbox.spy(vscode.window, 'showTextDocument');
+        const refreshPanel = sinon.stub();
 
-        await searchExplanations(() => tempDir, () => cache, output);
+        await searchExplanations(() => tempDir, () => cache, refreshPanel, output);
 
         assert.strictEqual(
             showTextDocumentSpy.called,
             false,
             'expected no navigation to happen when the quick pick is cancelled'
         );
+        assert.strictEqual(refreshPanel.called, false, 'expected refreshPanel not to be called when the quick pick is cancelled');
     });
 
     test('is a no-op (status message, no throw) when indexing is not ready', async function () {
         this.timeout(20_000);
-        await searchExplanations(() => undefined, () => undefined, output);
+        await searchExplanations(() => undefined, () => undefined, sinon.stub(), output);
     });
 
     test('shows a status message and never opens the quick pick when nothing is cached yet', async function () {
         this.timeout(20_000);
         const quickPickStub = sandbox.stub(vscode.window, 'showQuickPick');
 
-        await searchExplanations(() => tempDir, () => cache, output);
+        await searchExplanations(() => tempDir, () => cache, sinon.stub(), output);
 
         assert.strictEqual(quickPickStub.called, false, 'expected no quick pick against an empty cache');
     });
