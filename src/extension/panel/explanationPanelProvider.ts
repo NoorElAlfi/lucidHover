@@ -622,24 +622,6 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
     .risk-note {
         color: var(--vscode-editorWarning-foreground, var(--vscode-foreground));
     }
-    .graph-node-location {
-        color: var(--vscode-descriptionForeground);
-        font-size: 0.9em;
-        margin-left: 4px;
-    }
-    .branch-toggle {
-        margin: 0 0 10px 18px;
-    }
-    .branch-toggle summary {
-        cursor: pointer;
-        color: var(--vscode-textLink-foreground);
-    }
-    .branch-toggle summary:hover {
-        text-decoration: underline;
-    }
-    .branch-toggle .lh-graph-row {
-        margin: 8px 0 0 0;
-    }
     .timestamp {
         color: var(--vscode-descriptionForeground);
         font-size: 0.85em;
@@ -659,11 +641,12 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
        for the single-explanation view (renderExplanation), per the doc's
        own title. Session 59 extended the same .lh-card/.lh-section system
        to renderGraph (blast radius) -- see the .lh-graph-* rules below.
-       renderTrace/renderBranchPoint (execution trace) remain untouched,
-       a separate follow-up. Deliberately no .lh-card max-width cap here
-       (the reference file's 460px is sized for a hover-tooltip-shaped
-       card; this is the always-visible docked panel, which should use
-       whatever width the user's sidebar actually gives it). */
+       Session 60 extended it again to renderTrace/renderBranchPoint
+       (execution trace) -- see the .lh-trace-* rules below. Deliberately
+       no .lh-card max-width cap here (the reference file's 460px is sized
+       for a hover-tooltip-shaped card; this is the always-visible docked
+       panel, which should use whatever width the user's sidebar actually
+       gives it). */
     .lh-card {
         background: var(--vscode-editorHoverWidget-background, var(--vscode-editorWidget-background));
         border: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-editorWidget-border));
@@ -854,6 +837,60 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
        found"), since here it always follows a .lh-graph-list directly. */
     .lh-section .empty-state {
         margin-top: 6px;
+    }
+    /* ── Session 60: execution-trace (renderTrace/renderBranchPoint) rows ──
+       The root/start row and the "↓ calls" connector reuse .lh-section's own
+       padding/divider rhythm rather than adding a second layout system --
+       one .lh-section per hop, exactly like renderGraph's one-section-per-
+       depth-level, just without the count-badged "Level N" title, since a
+       linear trace has no fan-out to count at the section level (that's
+       what the branch-toggle below is for). */
+    .lh-trace-root .lh-graph-btn {
+        cursor: default;
+        font-weight: 600;
+    }
+    /* The root row is a plain <div>, not a real button (see renderTrace's
+       own comment on why it can't reuse renderGraphNode) -- override the
+       shared .lh-graph-btn:hover highlight so it doesn't look clickable. */
+    .lh-trace-root .lh-graph-btn:hover {
+        background: transparent;
+    }
+    .lh-trace-root .lh-graph-loc {
+        margin-left: 8px;
+        font-weight: 400;
+        font-style: italic;
+    }
+    .lh-trace-connector {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        color: var(--vscode-descriptionForeground);
+        font-size: 0.85em;
+        margin-bottom: 6px;
+    }
+    .lh-trace-connector .codicon { font-size: 12px; }
+    /* Nested one hop level under its parent .lh-graph-row (27px matches
+       .lh-graph-desc's own left offset, so the toggle and the description
+       line up under the same icon+name start column) rather than the old
+       flat 18px page-level indent, since this now lives inside a
+       .lh-section instead of directly in the timeline. */
+    .branch-toggle {
+        margin: 6px 0 0 27px;
+    }
+    .branch-toggle summary {
+        cursor: pointer;
+        color: var(--vscode-textLink-foreground);
+        font-size: 0.9em;
+    }
+    .branch-toggle summary:hover {
+        text-decoration: underline;
+    }
+    .branch-toggle summary:focus-visible {
+        outline: 1px solid var(--vscode-focusBorder);
+        outline-offset: 2px;
+    }
+    .branch-toggle .lh-graph-list {
+        margin-top: 8px;
     }
     .lh-nav-list { margin-top: 6px; display: flex; flex-direction: column; gap: 1px; }
     .lh-nav {
@@ -1395,7 +1432,12 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
     // browser gives <details>/<summary> natively. Each alternate renders
     // through the same renderGraphNode used for primary nodes, so an
     // uncached alternate gets the identical "Not yet indexed." placeholder.
-    function renderBranchPoint(branchPoint) {
+    // Session 60: takes an optional container (same optional-container
+    // pattern as renderGraphNode) so renderTrace can nest the toggle inside
+    // the hop's own .lh-section rather than appending it after the section
+    // at the top level of content.
+    function renderBranchPoint(branchPoint, container) {
+        container = container || content;
         const totalOther = branchPoint.alternates.length + branchPoint.omittedCount;
         if (totalOther === 0) {
             return;
@@ -1407,9 +1449,12 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
         summary.textContent = '+' + totalOther + ' other call' + (totalOther === 1 ? '' : 's') + ' from here';
         details.appendChild(summary);
 
+        const list = document.createElement('div');
+        list.className = 'lh-graph-list';
         for (const alt of branchPoint.alternates) {
-            renderGraphNode(alt, details);
+            renderGraphNode(alt, list);
         }
+        details.appendChild(list);
         if (branchPoint.omittedCount > 0) {
             const omittedP = document.createElement('p');
             omittedP.className = 'empty-state';
@@ -1417,15 +1462,15 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
             details.appendChild(omittedP);
         }
 
-        content.appendChild(details);
+        container.appendChild(details);
     }
 
     // Session 59: restyled to the card system -- each depth becomes an
     // .lh-section (matching Used By/Calls' own section treatment) inside a
     // single .lh-card, with a count badge on the "Level N" title (same
     // sectionTitle() helper renderExplanation uses) and node rows via the
-    // restyled renderGraphNode. Out of scope: renderTrace/renderBranchPoint
-    // (execution trace) below, untouched.
+    // restyled renderGraphNode. Session 60 applied the same treatment to
+    // renderTrace/renderBranchPoint below.
     function renderGraph(payload) {
         clear();
         addBackLink();
@@ -1481,7 +1526,16 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
     // laid out as an ordered sequence rather than session 45's depth-grouped
     // "Level N" sections -- a single-primary-path downstream trace has
     // exactly one node per depth, so grouping by depth would just be a list
-    // of one-item groups.
+    // of one-item groups. Session 60: restyled to the card system -- one
+    // .lh-section per hop (mirroring renderGraph's one-section-per-level),
+    // plus a leading .lh-section for the root/start row so the whole trace,
+    // including its starting point, reads as a single timeline inside one
+    // .lh-card. Deliberately keeps the root row inside the card even on the
+    // no-further-calls path (unlike renderGraph, which never emits a card at
+    // all when payload.nodes is empty) -- renderGraph has no root/start
+    // concept to anchor a card around, but renderTrace's root is always
+    // real and worth showing, so an empty trace still renders a one-row card
+    // rather than a bare paragraph.
     function renderTrace(payload) {
         clear();
         addBackLink();
@@ -1490,30 +1544,68 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
         h.textContent = payload.title;
         content.appendChild(h);
 
-        const start = document.createElement('p');
-        start.textContent = payload.rootName + ' (start)';
-        content.appendChild(start);
+        const card = document.createElement('div');
+        card.className = 'lh-card';
+
+        const rootSection = document.createElement('section');
+        rootSection.className = 'lh-section lh-trace-root';
+        const rootRow = document.createElement('div');
+        rootRow.className = 'lh-graph-row';
+        const rootBtn = document.createElement('div');
+        rootBtn.className = 'lh-graph-btn';
+        rootBtn.appendChild(codicon('symbol-method'));
+        const rootName = document.createElement('span');
+        rootName.className = 'lh-graph-name';
+        rootName.textContent = payload.rootName;
+        rootBtn.appendChild(rootName);
+        const rootBadge = document.createElement('span');
+        rootBadge.className = 'lh-graph-loc';
+        rootBadge.textContent = 'start';
+        rootBtn.appendChild(rootBadge);
+        rootRow.appendChild(rootBtn);
+        rootSection.appendChild(rootRow);
+        card.appendChild(rootSection);
 
         if (payload.nodes.length === 0) {
-            addParagraph('No confident downstream calls found from here.', 'empty-state');
+            const emptySection = document.createElement('section');
+            emptySection.className = 'lh-section';
+            const note = document.createElement('p');
+            note.className = 'empty-state';
+            note.textContent = 'No confident downstream calls found from here.';
+            emptySection.appendChild(note);
+            card.appendChild(emptySection);
+            content.appendChild(card);
             return;
         }
 
         const ordered = payload.nodes.slice().sort((a, b) => a.depth - b.depth);
         for (const node of ordered) {
-            const arrow = document.createElement('p');
-            arrow.className = 'graph-node-location';
-            arrow.textContent = '↓ calls';
-            content.appendChild(arrow);
-            renderGraphNode(node);
+            const section = document.createElement('section');
+            section.className = 'lh-section';
+
+            const connector = document.createElement('div');
+            connector.className = 'lh-trace-connector';
+            connector.appendChild(codicon('arrow-down'));
+            connector.appendChild(document.createTextNode('calls'));
+            section.appendChild(connector);
+
+            const list = document.createElement('div');
+            list.className = 'lh-graph-list';
+            renderGraphNode(node, list);
+            section.appendChild(list);
+
             // Session 48: a branch point's depth matches the primary node
             // whose hop produced it (see GraphViewBranchPoint's own doc
-            // comment) -- render it right after that node.
+            // comment) -- render it right after that node, nested inside
+            // this same hop's section.
             const branchPoint = payload.branches.find((b) => b.depth === node.depth);
             if (branchPoint) {
-                renderBranchPoint(branchPoint);
+                renderBranchPoint(branchPoint, section);
             }
+
+            card.appendChild(section);
         }
+        content.appendChild(card);
     }
 
     window.addEventListener('message', (event) => {
