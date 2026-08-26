@@ -266,6 +266,29 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
      * positive, rather than "any time before the next real navigate click."
      */
     private backTarget: { relFile: string; line: number; callerName: string; targetName: string; setAt: number } | undefined;
+    /**
+     * Session 61 (closing session 52's own carried-forward "no latest wins
+     * sequencing" finding): a monotonic counter, incremented at the start of
+     * every `refreshFor` call. `onSelectionChanged`/`refreshFromActiveEditor`
+     * fire `void this.refreshFor(editor)` on every cursor move with no
+     * cancellation, and `refreshFor` awaits `resolveEnclosingFunction` before
+     * committing anything -- under rapid cursor movement, an earlier call can
+     * resolve after a later one, and without this guard would overwrite the
+     * later call's already-rendered result with stale data. `refreshFor`
+     * captures its own call's value right after incrementing, then compares
+     * it back against this field once the await returns: a mismatch means a
+     * newer call has since started, so the stale one discards its result
+     * instead of touching `currentFunction` or posting anything.
+     *
+     * `showRow`/`showGraph` (an explicit hover-link push / a pinned graph
+     * view, neither of which goes through `refreshFor`) also bump this
+     * counter with no call of their own claiming the new value -- a
+     * code-reviewer finding: without that, a `refreshFor` call already
+     * in-flight when one of those fires could still resolve afterward and
+     * overwrite the just-pushed row or just-pinned graph with stale
+     * cursor-synced content.
+     */
+    private refreshSequence = 0;
 
     constructor(
         private readonly extensionUri: vscode.Uri,
@@ -353,6 +376,14 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
      * mouse when hovering can differ from wherever the text cursor is.
      */
     showRow(row: CacheRow): void {
+        // code-reviewer finding (Session 61): bump the sequence counter so
+        // an already-in-flight refreshFor (started before this push, still
+        // awaiting resolveEnclosingFunction) can't resolve afterward and
+        // overwrite what we're about to render -- see refreshSequence's own
+        // doc comment. No corresponding "this call" claims the new value;
+        // it exists purely to invalidate whatever refreshFor call is
+        // outstanding.
+        this.refreshSequence += 1;
         this.pinned = false;
         // No ResolvedFunction to offer here (see `currentFunction`'s doc
         // comment) -- the blast-radius/trace buttons fall back to live-
@@ -374,6 +405,10 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
      * overwrite it until the user clicks the view's own "<- Back" control.
      */
     showGraph(payload: GraphViewPayload): void {
+        // Same reasoning as showRow's own comment above -- invalidate any
+        // outstanding refreshFor call so it can't resolve after this pin and
+        // overwrite the graph view with a stale cursor-synced render.
+        this.refreshSequence += 1;
         this.pinned = true;
         if (this.view) {
             this.postGraph(payload);
@@ -445,6 +480,7 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
     }
 
     private async refreshFor(editor: vscode.TextEditor | undefined): Promise<void> {
+        const seq = ++this.refreshSequence;
         const workspaceRoot = this.getWorkspaceRoot();
         const cache = this.getCache();
         if (!this.view || !workspaceRoot || !cache || !editor || !isSupportedLanguageId(editor.document.languageId)) {
@@ -454,6 +490,13 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
         }
 
         const resolved = await resolveEnclosingFunction(editor.document, editor.selection.active, workspaceRoot);
+        if (seq !== this.refreshSequence) {
+            // A newer refreshFor call has started since this one began
+            // awaiting resolveEnclosingFunction -- discard this stale result
+            // rather than overwriting whatever the newer call already
+            // committed (or is about to).
+            return;
+        }
         if (!resolved) {
             this.currentFunction = undefined;
             this.postEmpty();

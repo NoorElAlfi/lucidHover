@@ -27,8 +27,17 @@ import * as vscode from 'vscode';
 import { EMBEDDING_MODEL_ID, PROMPT_VERSION, resolveModelId } from '../../cache/config';
 import { CacheRow, ExplanationCache } from '../../cache/explanationCache';
 import { resolveEnclosingFunction, ResolvedFunction } from '../../functionResolution';
+// Session 61: imported as a namespace (alongside the named import above) so
+// its `resolveEnclosingFunction` can be sinon-stubbed on the shared CommonJS
+// exports object -- explanationPanelProvider.ts calls it via
+// `functionResolution_1.resolveEnclosingFunction(...)` under the hood
+// (tsconfig's `module: commonjs`), so replacing the property here replaces
+// what production code calls too, since both `require` the same module
+// instance.
+import * as functionResolution from '../../functionResolution';
 import {
     ExplanationPanelProvider,
+    GraphViewPayload,
     NAVIGATE_COMMAND_ID,
     REFRESH_COMMAND_ID,
     SHOW_BLAST_RADIUS_COMMAND_ID,
@@ -624,6 +633,289 @@ suite('panel/explanationPanelProvider "Back to caller" (Session 58)', () => {
         assert.ok(
             callerRenderCall,
             'expected backToCaller to refresh the panel unconditionally, not only via the selection-changed event'
+        );
+    });
+});
+
+/**
+ * Session 61: closes session 52's own carried-forward "no latest wins
+ * sequencing" finding (see that session's "Handoff for next session").
+ * `onSelectionChanged`/`refreshFromActiveEditor` fire `void this.refreshFor(editor)`
+ * on every cursor move with no cancellation; `refreshFor` awaits
+ * `resolveEnclosingFunction` before committing `currentFunction` or posting a
+ * render. Under rapid cursor movement, an earlier-triggered call's promise
+ * can resolve after a later-triggered one's -- without sequencing, the
+ * earlier call's stale result would overwrite both the rendered card and
+ * `currentFunction` with the wrong function, silently mistargeting anything
+ * that reads `currentFunction` afterward (blast radius, execution trace,
+ * regenerate, "Back to caller").
+ *
+ * Reproduces the race directly by stubbing `resolveEnclosingFunction` (via
+ * the CommonJS-shared exports object, see the `functionResolution` namespace
+ * import above) so the first-triggered call's promise is held open while a
+ * second, later-triggered call is resolved first -- then resolves the first
+ * call afterward and confirms its result was discarded rather than applied.
+ */
+suite('panel/explanationPanelProvider refreshFor sequencing (Session 61)', () => {
+    let tempDir: string;
+    let output: vscode.OutputChannel;
+    let sandbox: sinon.SinonSandbox;
+    let cache: ExplanationCache;
+    let panel: ExplanationPanelProvider;
+
+    async function waitForSymbols(document: vscode.TextDocument): Promise<void> {
+        for (let attempt = 0; attempt < 40; attempt++) {
+            const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
+                'vscode.executeDocumentSymbolProvider',
+                document.uri
+            );
+            if (symbols && symbols.length > 0) {
+                return;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+        assert.fail(`document symbol provider never returned symbols for ${document.uri.fsPath}`);
+    }
+
+    const targetContent = 'function alpha() {\n  return 1;\n}\n\nfunction beta() {\n  return 2;\n}\n';
+
+    suiteSetup(async function () {
+        this.timeout(30_000);
+        tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lucidhover-panel-sequencing-'));
+        fs.writeFileSync(path.join(tempDir, 'target.js'), targetContent, 'utf8');
+        output = vscode.window.createOutputChannel('LucidHover Panel Sequencing Test');
+    });
+
+    suiteTeardown(function () {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+    });
+
+    setup(() => {
+        sandbox = sinon.createSandbox();
+        const dbPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'lucidhover-panel-sequencing-cache-')), 'cache.sqlite');
+        cache = new ExplanationCache(dbPath);
+        panel = new ExplanationPanelProvider(
+            vscode.Uri.file(tempDir),
+            () => tempDir,
+            () => cache,
+            () => undefined,
+            () => undefined,
+            output
+        );
+    });
+
+    teardown(() => {
+        cache.dispose();
+        sandbox.restore();
+    });
+
+    function cacheRowFor(resolved: ResolvedFunction, cacheKey: string): CacheRow {
+        return {
+            cache_key: cacheKey,
+            fn_id: resolved.fnId,
+            explanation_json: JSON.stringify({ role_tag: 'utility', one_liner: 'test' }),
+            fn_hash: resolved.fnHash,
+            context_hash: 'ctx',
+            model_id: resolveModelId(),
+            embedding_model_id: EMBEDDING_MODEL_ID,
+            prompt_version: PROMPT_VERSION,
+            context_tier: 'call_graph_only',
+            generated_at: new Date().toISOString(),
+        };
+    }
+
+    test('a later-triggered refreshFor call wins even if an earlier-triggered one resolves after it', async () => {
+        const document = await vscode.workspace.openTextDocument(path.join(tempDir, 'target.js'));
+        await waitForSymbols(document);
+        const editor = await vscode.window.showTextDocument(document);
+
+        const alphaPos = new vscode.Position(0, 10);
+        const betaPos = new vscode.Position(4, 10);
+        // Resolve both real ResolvedFunctions up front (before stubbing) --
+        // the stub below returns these pre-computed values after an
+        // artificial delay, rather than re-deriving them, so the race is
+        // purely about resolution *order*, not resolution correctness.
+        const alpha = await resolveEnclosingFunction(document, alphaPos, tempDir);
+        const beta = await resolveEnclosingFunction(document, betaPos, tempDir);
+        assert.ok(alpha, 'expected to resolve alpha()');
+        assert.ok(beta, 'expected to resolve beta()');
+
+        cache.write(cacheRowFor(alpha!, 'test-key-alpha'));
+        cache.write(cacheRowFor(beta!, 'test-key-beta'));
+
+        const fakeView = createFakeWebviewView();
+        panel.resolveWebviewView(fakeView as unknown as vscode.WebviewView);
+        fakeView.webview.postMessage.resetHistory();
+
+        // Keyed off document+position (real args), not a global call
+        // counter -- this test's temp document is the active editor for the
+        // whole (shared, real) extension host window, so the actually
+        // activated extension's own singleton ExplanationPanelProvider (if
+        // its webview happens to be visible from an earlier test in this
+        // suite) also reacts to these same selection changes and calls this
+        // same shared, module-level resolveEnclosingFunction -- a global
+        // call counter would have its slots consumed unpredictably by that
+        // unrelated instance. Falling back to the real implementation for
+        // any other document/position keeps that instance (and anything
+        // else calling resolveEnclosingFunction concurrently) working
+        // correctly, since it's irrelevant to this test's own assertions.
+        const realResolveEnclosingFunction = functionResolution.resolveEnclosingFunction;
+        sandbox.stub(functionResolution, 'resolveEnclosingFunction').callsFake((doc, position, root) => {
+            if (doc.uri.fsPath === document.uri.fsPath && position.isEqual(alphaPos)) {
+                // Artificially slow -- this is the earlier-triggered call.
+                return new Promise<ResolvedFunction | undefined>((resolve) => setTimeout(() => resolve(alpha), 150));
+            }
+            if (doc.uri.fsPath === document.uri.fsPath && position.isEqual(betaPos)) {
+                // Fast -- the later-triggered call resolves first.
+                return new Promise<ResolvedFunction | undefined>((resolve) => setTimeout(() => resolve(beta), 10));
+            }
+            return realResolveEnclosingFunction(doc, position, root);
+        });
+
+        // First-triggered call: cursor on alpha() (150ms artificial delay).
+        editor.selection = new vscode.Selection(alphaPos, alphaPos);
+        panel.onSelectionChanged(editor);
+
+        // Second-triggered call: cursor moves to beta() (10ms artificial
+        // delay) shortly after, before the first call has resolved -- the
+        // exact overlap the real bug hit. Beta's call, despite starting
+        // second, resolves first.
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        editor.selection = new vscode.Selection(betaPos, betaPos);
+        panel.onSelectionChanged(editor);
+
+        // Wait long enough for both delayed calls to resolve (alpha's 150ms
+        // delay, started ~20ms before beta's, finishes around the 170ms
+        // mark).
+        await new Promise((resolve) => setTimeout(resolve, 250));
+
+        const renderCalls = fakeView.webview.postMessage.getCalls().filter((c) => c.args[0]?.type === 'render');
+        const renderedNames = renderCalls.map((c) => c.args[0]?.fnName);
+        assert.deepStrictEqual(
+            renderedNames,
+            ['beta'],
+            'expected only the later-triggered call (beta) to render -- the earlier-triggered, later-resolving call (alpha) must be discarded, not applied on top'
+        );
+
+        // currentFunction must also reflect beta, not alpha -- confirmed
+        // indirectly via the showBlastRadius forwarding fix from session 52,
+        // which targets whatever the panel considers "currently displayed."
+        const executeCommandStub = sandbox.stub(vscode.commands, 'executeCommand').resolves();
+        fakeView.simulateMessageFromWebview({ type: 'showBlastRadius' });
+        assert.strictEqual(executeCommandStub.calledOnce, true);
+        const [, target] = executeCommandStub.firstCall.args;
+        assert.strictEqual(
+            target?.fnId,
+            beta!.fnId,
+            'expected currentFunction to be the later-triggered call\'s function (beta), not the stale earlier one (alpha)'
+        );
+    });
+
+    // code-reviewer finding on this session's own diff: showRow/showGraph
+    // push state independent of refreshFor, but didn't originally invalidate
+    // an already-in-flight refreshFor call -- so a slow cursor-driven
+    // resolution could still land afterward and clobber what was just
+    // pushed/pinned. Fixed by having showRow/showGraph also bump
+    // refreshSequence (with no call of their own claiming the new value).
+    test('showRow invalidates an in-flight refreshFor call, so it cannot overwrite the pushed row afterward', async () => {
+        const document = await vscode.workspace.openTextDocument(path.join(tempDir, 'target.js'));
+        await waitForSymbols(document);
+        const editor = await vscode.window.showTextDocument(document);
+
+        const alphaPos = new vscode.Position(0, 10);
+        const alpha = await resolveEnclosingFunction(document, alphaPos, tempDir);
+        assert.ok(alpha, 'expected to resolve alpha()');
+        cache.write(cacheRowFor(alpha!, 'test-key-alpha-showrow'));
+
+        const pushedRow = cacheRowFor(alpha!, 'test-key-pushed-row');
+        // Give the pushed row a distinguishable fn_id so it's unmistakable
+        // in the render message which one won.
+        pushedRow.fn_id = 'target.js::pushed';
+
+        const fakeView = createFakeWebviewView();
+        panel.resolveWebviewView(fakeView as unknown as vscode.WebviewView);
+        fakeView.webview.postMessage.resetHistory();
+
+        const realResolveEnclosingFunction = functionResolution.resolveEnclosingFunction;
+        sandbox.stub(functionResolution, 'resolveEnclosingFunction').callsFake((doc, position, root) => {
+            if (doc.uri.fsPath === document.uri.fsPath && position.isEqual(alphaPos)) {
+                return new Promise<ResolvedFunction | undefined>((resolve) => setTimeout(() => resolve(alpha), 150));
+            }
+            return realResolveEnclosingFunction(doc, position, root);
+        });
+
+        // Start a slow cursor-driven refreshFor for alpha() ...
+        editor.selection = new vscode.Selection(alphaPos, alphaPos);
+        panel.onSelectionChanged(editor);
+
+        // ... then, before it resolves, an explicit hover "Show more" push
+        // arrives for a different row entirely.
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        panel.showRow(pushedRow);
+
+        // Wait long enough for the slow refreshFor(alpha) to resolve.
+        await new Promise((resolve) => setTimeout(resolve, 200));
+
+        const renderCalls = fakeView.webview.postMessage.getCalls().filter((c) => c.args[0]?.type === 'render');
+        const renderedFnNames = renderCalls.map((c) => c.args[0]?.fnName);
+        assert.deepStrictEqual(
+            renderedFnNames,
+            ['pushed'],
+            'expected only the showRow push to render -- the in-flight refreshFor(alpha) must be invalidated, not applied on top'
+        );
+
+        // currentFunction must stay undefined (showRow's own documented
+        // behavior), not get clobbered back to alpha by the stale refreshFor.
+        const executeCommandStub = sandbox.stub(vscode.commands, 'executeCommand').resolves();
+        fakeView.simulateMessageFromWebview({ type: 'showBlastRadius' });
+        const [, target] = executeCommandStub.firstCall.args;
+        assert.strictEqual(target, undefined, 'expected currentFunction to remain undefined after showRow, not reverted to the stale refreshFor result');
+    });
+
+    test('showGraph invalidates an in-flight refreshFor call, so it cannot overwrite the pinned graph view afterward', async () => {
+        const document = await vscode.workspace.openTextDocument(path.join(tempDir, 'target.js'));
+        await waitForSymbols(document);
+        const editor = await vscode.window.showTextDocument(document);
+
+        const alphaPos = new vscode.Position(0, 10);
+        const alpha = await resolveEnclosingFunction(document, alphaPos, tempDir);
+        assert.ok(alpha, 'expected to resolve alpha()');
+        cache.write(cacheRowFor(alpha!, 'test-key-alpha-showgraph'));
+
+        const fakeView = createFakeWebviewView();
+        panel.resolveWebviewView(fakeView as unknown as vscode.WebviewView);
+        fakeView.webview.postMessage.resetHistory();
+
+        const realResolveEnclosingFunction = functionResolution.resolveEnclosingFunction;
+        sandbox.stub(functionResolution, 'resolveEnclosingFunction').callsFake((doc, position, root) => {
+            if (doc.uri.fsPath === document.uri.fsPath && position.isEqual(alphaPos)) {
+                return new Promise<ResolvedFunction | undefined>((resolve) => setTimeout(() => resolve(alpha), 150));
+            }
+            return realResolveEnclosingFunction(doc, position, root);
+        });
+
+        editor.selection = new vscode.Selection(alphaPos, alphaPos);
+        panel.onSelectionChanged(editor);
+
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        const graphPayload: GraphViewPayload = {
+            title: 'Blast radius',
+            direction: 'upstream',
+            rootName: 'alpha',
+            nodes: [],
+            edges: [],
+            omissions: [],
+            branches: [],
+        };
+        panel.showGraph(graphPayload);
+
+        await new Promise((resolve) => setTimeout(resolve, 200));
+
+        const messageTypes = fakeView.webview.postMessage.getCalls().map((c) => c.args[0]?.type);
+        assert.deepStrictEqual(
+            messageTypes,
+            ['renderGraph'],
+            'expected only the showGraph pin to post a message -- the in-flight refreshFor(alpha) must be invalidated, not allowed to post a render/empty message on top of the pinned graph'
         );
     });
 });
