@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<!--
+  LucidHover card — redesign template
+  ────────────────────────────────────
+  Everything visual comes from VS Code itself:
+    • Colors/fonts: --vscode-* theme tokens (auto-adapt to every theme, incl. high contrast)
+    • Icons: codicons, VS Code's own icon font (@vscode/codicons — the same glyphs the workbench uses)
+
+  This card is the EXPANDED view: the user already clicked "show more" in the
+  hover tooltip to get here, so the explanation renders in full — no clamping
+  or "More…" toggle in this view.
+
+  Wiring (in your extension, when building the webview HTML):
+    const codiconUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(extensionUri, 'node_modules', '@vscode/codicons', 'dist', 'codicon.css')
+    );
+    // CSP must allow:  style-src ${webview.cspSource};  font-src ${webview.cspSource};
+    // Then replace {{CODICON_URI}} below with codiconUri.toString().
+
+  NOTE: Regenerate / Copy are real labeled buttons (VS Code secondary-button style),
+  so they stay visible even if the codicon font hasn't loaded yet.
+
+  Template placeholders ({{...}}) map 1:1 to your strict JSON fields.
+-->
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'unsafe-inline'; font-src 'self';">
+<link rel="stylesheet" href="{{CODICON_URI}}">
+<style>
+  /* ── Base ─────────────────────────────────────────────── */
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: var(--vscode-font-family);
+    font-size: var(--vscode-font-size);
+    font-weight: var(--vscode-font-weight);
+    color: var(--vscode-editorHoverWidget-foreground, var(--vscode-foreground));
+    line-height: 1.5;
+  }
+
+  .lh-card {
+    max-width: 460px;              /* measure: keeps paragraphs scannable */
+    background: var(--vscode-editorHoverWidget-background, var(--vscode-editorWidget-background));
+    border: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-editorWidget-border));
+    border-radius: 6px;
+    overflow: hidden;
+  }
+
+  /* ── Header ───────────────────────────────────────────── */
+  .lh-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 10px 12px 8px;
+  }
+
+  .lh-title-row {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    min-width: 0;                  /* lets the name ellipsis instead of overflowing */
+  }
+
+  .lh-kind-icon {
+    font-size: 16px;
+    color: var(--vscode-symbolIcon-methodForeground, var(--vscode-symbolIcon-functionForeground, inherit));
+    flex-shrink: 0;
+  }
+
+  .lh-name {
+    font-family: var(--vscode-editor-font-family);
+    font-size: calc(var(--vscode-font-size) + 1px);
+    font-weight: 600;
+    background: var(--vscode-textCodeBlock-background);
+    padding: 1px 6px;
+    border-radius: 4px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .lh-meta {
+    margin-top: 4px;
+    margin-left: 23px;             /* aligns with name, past the kind icon */
+    font-size: 11px;
+    color: var(--vscode-descriptionForeground);
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .lh-meta .lh-file { color: var(--vscode-textLink-foreground); }
+
+  /* ── Action buttons (Regenerate / Copy) ─────────────────
+     Labeled secondary buttons — the exact look of VS Code's
+     own secondary buttons, readable without the icon font. */
+  .lh-actions {
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
+    margin-left: auto;
+  }
+
+  .lh-btn {
+    appearance: none;
+    border: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-family: var(--vscode-font-family);
+    font-size: calc(var(--vscode-font-size) - 1px);
+    line-height: 18px;
+    color: var(--vscode-button-secondaryForeground);
+    background: var(--vscode-button-secondaryBackground);
+  }
+  .lh-btn:hover { background: var(--vscode-button-secondaryHoverBackground); }
+  .lh-btn:focus-visible {
+    outline: 1px solid var(--vscode-focusBorder);
+    outline-offset: 1px;
+  }
+  .lh-btn .codicon { font-size: 13px; }
+
+  /* Regenerating state: add .is-busy, disable the button */
+  .lh-btn.is-busy { opacity: 0.7; cursor: default; }
+  .lh-btn.is-busy .codicon-sync { animation: lh-spin 1s linear infinite; }
+  @keyframes lh-spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) {
+    .lh-btn.is-busy .codicon-sync { animation: none; }
+  }
+
+  /* ── Sections ─────────────────────────────────────────── */
+  .lh-section { padding: 8px 12px 10px; }
+  .lh-section + .lh-section {
+    border-top: 1px solid var(--vscode-widget-border, rgba(128, 128, 128, 0.2));
+  }
+
+  .lh-section-title {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--vscode-sideBarSectionHeader-foreground, var(--vscode-descriptionForeground));
+    margin-bottom: 6px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  /* Count badge, e.g. "Used by 4" */
+  .lh-count {
+    background: var(--vscode-badge-background);
+    color: var(--vscode-badge-foreground);
+    border-radius: 8px;
+    padding: 0 6px;
+    font-size: 10px;
+    font-weight: 400;
+    line-height: 16px;
+    text-transform: none;
+    letter-spacing: 0;
+  }
+
+  /* Explanation body: rendered in FULL (this is the expanded view).
+     Readability comes from the measure limit + line-height, not truncation. */
+  .lh-body { max-width: 60ch; }
+
+  .lh-body code {
+    font-family: var(--vscode-editor-font-family);
+    font-size: 0.92em;
+    background: var(--vscode-textCodeBlock-background);
+    padding: 0 4px;
+    border-radius: 3px;
+  }
+
+  /* ── Reference list (Used by) ─────────────────────────── */
+  .lh-refs { list-style: none; }
+
+  .lh-refs a {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 3px 6px;
+    margin: 0 -6px;                /* full-bleed hover row, like the Explorer */
+    border-radius: 4px;
+    color: var(--vscode-foreground);
+    text-decoration: none;
+  }
+  .lh-refs a:hover { background: var(--vscode-list-hoverBackground); }
+  .lh-refs a:focus-visible {
+    outline: 1px solid var(--vscode-focusBorder);
+    outline-offset: -1px;
+  }
+  .lh-refs .codicon {
+    color: var(--vscode-symbolIcon-methodForeground, inherit);
+    flex-shrink: 0;
+  }
+  .lh-refs .lh-ref-file {
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--vscode-descriptionForeground);
+  }
+
+  /* ── Navigation links (blast radius / trace) ──────────── */
+  .lh-nav-list { margin-top: 6px; display: flex; flex-direction: column; gap: 1px; }
+
+  .lh-nav {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 0;
+    color: var(--vscode-textLink-foreground);
+    text-decoration: none;
+    font-size: var(--vscode-font-size);
+  }
+  .lh-nav:hover { color: var(--vscode-textLink-activeForeground); text-decoration: underline; }
+  .lh-nav .codicon { font-size: 12px; transition: transform 80ms ease; }
+  .lh-nav:hover .codicon { transform: translateX(2px); }
+  @media (prefers-reduced-motion: reduce) {
+    .lh-nav .codicon { transition: none; }
+  }
+
+  /* ── Empty / positive state (e.g. no side effects) ────── */
+  .lh-empty {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    color: var(--vscode-descriptionForeground);
+    font-size: calc(var(--vscode-font-size) - 1px);
+  }
+  .lh-empty .codicon-check { color: var(--vscode-testing-iconPassed, var(--vscode-charts-green)); }
+
+  /* Warning-flavoured list, for when side effects DO exist */
+  .lh-flags { list-style: none; display: flex; flex-direction: column; gap: 4px; }
+  .lh-flags li { display: flex; gap: 7px; align-items: baseline; }
+  .lh-flags .codicon {
+    font-size: 12px;
+    color: var(--vscode-problemsWarningIcon-foreground, var(--vscode-editorWarning-foreground));
+    position: relative;
+    top: 1px;
+  }
+
+  /* ── Footer disclaimer ────────────────────────────────── */
+  .lh-footer {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 6px 12px;
+    border-top: 1px solid var(--vscode-widget-border, rgba(128, 128, 128, 0.2));
+    font-size: 11px;
+    color: var(--vscode-descriptionForeground);
+  }
+  .lh-footer .codicon {
+    color: var(--vscode-problemsWarningIcon-foreground, var(--vscode-editorWarning-foreground));
+    flex-shrink: 0;
+  }
+  /* Stale state: explanation generated before the file last changed */
+  .lh-footer.is-stale { color: var(--vscode-editorWarning-foreground, inherit); }
+</style>
+</head>
+<body>
+
+<div class="lh-card" role="document" aria-label="Explanation of formatDate">
+
+  <!-- Header: symbol identity + action buttons -->
+  <header class="lh-header">
+    <div>
+      <div class="lh-title-row">
+        <span class="codicon codicon-symbol-method lh-kind-icon" aria-hidden="true"></span>
+        <span class="lh-name">formatDate</span>
+      </div>
+      <div class="lh-meta">
+        <span>Function</span>
+        <span aria-hidden="true">·</span>
+        <span class="lh-file">repomap/utils.js</span>
+        <span aria-hidden="true">·</span>
+        <!-- Full timestamp goes in the tooltip; relative time stays glanceable -->
+        <span title="Generated Aug 25, 2026, 1:31 PM">2 min ago</span>
+      </div>
+    </div>
+
+    <!-- Labeled buttons: visible with or without the codicon font -->
+    <div class="lh-actions">
+      <button class="lh-btn" data-command="regenerate" title="Regenerate explanation">
+        <span class="codicon codicon-sync" aria-hidden="true"></span>Regenerate
+      </button>
+      <button class="lh-btn" data-command="copy" title="Copy explanation as Markdown">
+        <span class="codicon codicon-copy" aria-hidden="true"></span>Copy
+      </button>
+    </div>
+  </header>
+
+  <!-- Why it exists: full text, no clamp (user already expanded from the hover) -->
+  <section class="lh-section">
+    <h2 class="lh-section-title">Why it exists</h2>
+    <p class="lh-body">
+      Formats a <code>Date</code> as an ISO 8601 date string (YYYY-MM-DD). It has no side
+      effects — it converts the value without touching external state or services. Shared by
+      <code>sendWelcomeEmail</code>, <code>renderDashboard</code>, <code>exportUsersReport</code>
+      and <code>syncUserCache</code>, which all need identical date formatting.
+    </p>
+  </section>
+
+  <!-- Used by: real list, count badge, navigation lives here -->
+  <section class="lh-section">
+    <h2 class="lh-section-title">
+      Used by <span class="lh-count">4</span>
+    </h2>
+    <ul class="lh-refs">
+      <li>
+        <a href="#" data-command="reveal" data-target="repomap/email.js:sendWelcomeEmail">
+          <span class="codicon codicon-symbol-method" aria-hidden="true"></span>
+          sendWelcomeEmail
+          <span class="lh-ref-file">repomap/email.js</span>
+        </a>
+      </li>
+      <li>
+        <a href="#" data-command="reveal" data-target="ui/dashboard.js:renderDashboard">
+          <span class="codicon codicon-symbol-method" aria-hidden="true"></span>
+          renderDashboard
+          <span class="lh-ref-file">ui/dashboard.js</span>
+        </a>
+      </li>
+      <li>
+        <a href="#" data-command="reveal" data-target="reports/export.js:exportUsersReport">
+          <span class="codicon codicon-symbol-method" aria-hidden="true"></span>
+          exportUsersReport
+          <span class="lh-ref-file">reports/export.js</span>
+        </a>
+      </li>
+      <!-- Cap the list at ~3; the rest live behind "blast radius" -->
+    </ul>
+    <div class="lh-nav-list">
+      <a class="lh-nav" href="#" data-command="blastRadius">
+        See full blast radius <span class="codicon codicon-chevron-right" aria-hidden="true"></span>
+      </a>
+      <a class="lh-nav" href="#" data-command="trace">
+        Trace execution from here <span class="codicon codicon-chevron-right" aria-hidden="true"></span>
+      </a>
+    </div>
+  </section>
+
+  <!-- Side effects: pick ONE of the two states from the JSON -->
+  <section class="lh-section">
+    <h2 class="lh-section-title">Side effects</h2>
+
+    <!-- State A: none -->
+    <div class="lh-empty">
+      <span class="codicon codicon-check" aria-hidden="true"></span>
+      None detected — pure function
+    </div>
+
+    <!-- State B: present (render instead of State A)
+    <ul class="lh-flags">
+      <li><span class="codicon codicon-warning" aria-hidden="true"></span> Writes to user cache</li>
+      <li><span class="codicon codicon-warning" aria-hidden="true"></span> Network call (email service)</li>
+    </ul>
+    -->
+  </section>
+
+  <!-- Trust footer -->
+  <footer class="lh-footer">
+    <span class="codicon codicon-warning" aria-hidden="true"></span>
+    <span>Generated by a local LLM — may be inaccurate, verify before relying on it.</span>
+  </footer>
+
+</div>
+
+</body>
+</html>

@@ -52,7 +52,7 @@ function resolveOllamaEndpointAndWarn(output: vscode.OutputChannel): string {
     if (rejectedValue) {
         output.appendLine(
             `lucidHover.ollamaEndpoint "${rejectedValue}" is not a local address -- LucidHover is fully local ` +
-                `(Core Rule 1) and will not contact it. Falling back to ${DEFAULT_OLLAMA_ENDPOINT}.`
+                `and will not contact it. Falling back to ${DEFAULT_OLLAMA_ENDPOINT}.`
         );
         vscode.window.showWarningMessage(
             `LucidHover: "${rejectedValue}" is not a local Ollama endpoint and was rejected. Using ${DEFAULT_OLLAMA_ENDPOINT} instead.`
@@ -181,8 +181,11 @@ export function activate(context: vscode.ExtensionContext): void {
     // Panel registration is likewise unconditional (Core Rule 6) -- it only
     // ever reads from the cache (never triggers generation), same as hover.
     const panelProvider = new ExplanationPanelProvider(
+        context.extensionUri,
         () => indexedWorkspaceRoot,
         () => explanationCache ?? undefined,
+        () => dirtyTracker,
+        () => staleTracker,
         output
     );
     context.subscriptions.push(
@@ -194,6 +197,7 @@ export function activate(context: vscode.ExtensionContext): void {
         registerNavigateToFunctionCommand(
             () => indexedWorkspaceRoot,
             () => sidecarManager ?? undefined,
+            () => panelProvider.refreshNow(),
             output
         )
     );
@@ -386,7 +390,7 @@ export function activate(context: vscode.ExtensionContext): void {
     if (isWorkspaceTrusted()) {
         void startIndexing(context, output);
     } else {
-        vscode.window.showInformationMessage('Indexing paused — trust this workspace to enable LucidHover');
+        vscode.window.showInformationMessage('LucidHover: indexing paused — trust this workspace to enable LucidHover');
 
         const grantSubscription = onDidGrantWorkspaceTrust(() => {
             void startIndexing(context, output);

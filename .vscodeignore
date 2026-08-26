@@ -34,6 +34,8 @@ CLAUDE.md
 codebase-explainer-vscode-extension.md
 lucidhover-current-state.md
 lucidhover-session-briefs-*.md
+lucidhover-ui-improvements.md
+lucidhover-card-redesign.html
 oddResponses.txt
 workflow-review.md
 docs/**
@@ -48,6 +50,16 @@ dist/**
 # since a matching prebuild always exists for our supported platforms.
 node_modules/better-sqlite3/deps/**
 node_modules/better-sqlite3/src/**
+
+# @vscode/codicons ships far more than the panel webview needs at runtime
+# (dist/codicon.css + dist/codicon.ttf, ~188 KB) -- codicon.html/codicon.svg/
+# codicon.csv/codiconsLibrary.ts/metadata.json are dev-only reference
+# material, ~4.7 MB.
+node_modules/@vscode/codicons/dist/codicon.html
+node_modules/@vscode/codicons/dist/codicon.svg
+node_modules/@vscode/codicons/dist/codicon.csv
+node_modules/@vscode/codicons/dist/codiconsLibrary.ts
+node_modules/@vscode/codicons/dist/metadata.json
 
 # Build/cache artifacts that can end up on disk locally
 **/__pycache__/**

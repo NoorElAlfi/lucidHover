@@ -48,6 +48,13 @@ const MAX_RESTART_ATTEMPTS = 5;
 /** Exponential backoff between (re)start attempts: 2s, 4s, 8s, 16s, 30s (capped). */
 const RESTART_BACKOFF_BASE_MS = 2_000;
 const RESTART_BACKOFF_MAX_MS = 30_000;
+/** Marketplace-readiness gate finding (code-reviewer): only `python` was ever
+ * tried. Many non-Windows setups (notably Debian/Ubuntu-derived Linux, some
+ * macOS installs) only put `python3` on PATH, so every one of those users hit
+ * a guaranteed `spawn-failed` on first activation. Tried in order -- `python3`
+ * only on an ENOENT from the previous candidate, not on every start, so the
+ * common (already-working) case pays no extra cost. */
+const SPAWN_INTERPRETER_CANDIDATES = ['python', 'python3'] as const;
 
 /**
  * Session 32: distinguishes a real-time-sensitive caller (hover cache-miss,
@@ -68,9 +75,9 @@ export type RequestPriority = 'interactive' | 'background';
  * on a large repo, so the connect error's message/code can't tell them
  * apart. Classification instead reads the child process's own observed
  * state at the moment `start()` gives up:
- *  - `'spawn-failed'`: the child's `'error'` event fired (e.g. `python` is
- *    not on PATH) -- a real spawn-level failure, most specific and checked
- *    first.
+ *  - `'spawn-failed'`: the child's `'error'` event fired (e.g. no candidate
+ *    interpreter in `SPAWN_INTERPRETER_CANDIDATES` is on PATH) -- a real
+ *    spawn-level failure, most specific and checked first.
  *  - `'process-crashed'`: the child spawned but has already exited (e.g. an
  *    uncaught exception during `RepoMap.index()`) before ever reaching
  *    `_serve_windows`/`_serve_posix`.
@@ -261,14 +268,36 @@ export class SidecarManager implements vscode.Disposable {
         const address = computeAddress();
         this.log(`spawning sidecar (address=${address}, root=${this.workspaceRoot})`);
 
-        // `storageDir`/`embeddingModelId` (Session 11) and `ollamaBaseUrl`
-        // (Build Order step 14): spawn-time, not per-request, params -- see
-        // cache/config.ts's EMBEDDING_MODEL_ID / resolveOllamaEndpoint doc
-        // comments for why the retrieval tier and the custom-endpoint tier
-        // both need these known before the sidecar's startup embedding pass
-        // runs, ahead of any RPC call.
+        this.expectedExit = false;
+        this.lastSpawnError = null;
+        this.spawnChild(address, 0);
+
+        const socket = await connectWithRetry(address, this.connectFn, this.connectRetryAttempts, this.connectRetryDelayMs);
+        this.socket = socket;
+        this.buffer = '';
+        socket.on('data', (chunk: Buffer) => this.onData(chunk));
+        socket.on('error', (err) => this.log(`socket error: ${err.message}`));
+
+        this.heartbeatTimer = setInterval(() => {
+            void this.heartbeatTick();
+        }, HEARTBEAT_INTERVAL_MS);
+    }
+
+    /**
+     * Spawns one interpreter candidate and wires its stdout/stderr/error/exit
+     * listeners. On an ENOENT from this candidate (interpreter not on PATH),
+     * retries with the next candidate in `SPAWN_INTERPRETER_CANDIDATES`
+     * instead of giving up immediately -- reusing the same address, so
+     * `connectWithRetry`'s already-in-flight poll picks up whichever
+     * candidate actually starts `rpc_server.py` without needing its own
+     * restart. Only the last candidate's failure is recorded as
+     * `lastSpawnError` for `classifyStartFailure()` to read once
+     * `connectWithRetry` eventually times out.
+     */
+    private spawnChild(address: string, interpreterIndex: number): void {
+        const interpreter = SPAWN_INTERPRETER_CANDIDATES[interpreterIndex];
         const child = this.spawnFn(
-            'python',
+            interpreter,
             [
                 '-m',
                 'sidecar.rpc_server',
@@ -281,19 +310,17 @@ export class SidecarManager implements vscode.Disposable {
             { cwd: this.extensionRoot }
         );
         this.childProcess = child;
-        this.expectedExit = false;
-        this.lastSpawnError = null;
 
         child.stdout?.on('data', (data: Buffer) => this.log(data.toString('utf8').trimEnd()));
         child.stderr?.on('data', (data: Buffer) => this.log(`[stderr] ${data.toString('utf8').trimEnd()}`));
         // Session 53: previously unhandled -- an 'error' event with no
         // listener throws instead of just failing quietly, so this was a
         // real (if narrow) crash risk on top of being the one signal that
-        // distinguishes a genuine spawn failure (e.g. `python` missing from
-        // PATH) from a child that spawned fine and is just slow to listen
-        // (see `RecoveryFailureCause`'s doc comment). Recorded on `this`,
-        // not just logged, so `runRecoveryLoop`'s catch block can read it
-        // after `connectWithRetry` eventually times out.
+        // distinguishes a genuine spawn failure (e.g. no candidate
+        // interpreter is on PATH) from a child that spawned fine and is
+        // just slow to listen (see `RecoveryFailureCause`'s doc comment).
+        // Recorded on `this`, not just logged, so `runRecoveryLoop`'s catch
+        // block can read it after `connectWithRetry` eventually times out.
         //
         // `this.childProcess !== child` guards this the same way the
         // `exit` handler below already does -- `teardown()` kills the old
@@ -307,6 +334,12 @@ export class SidecarManager implements vscode.Disposable {
                 return;
             }
             const errno = err as NodeJS.ErrnoException;
+            const nextInterpreter = SPAWN_INTERPRETER_CANDIDATES[interpreterIndex + 1];
+            if (errno.code === 'ENOENT' && nextInterpreter) {
+                this.log(`"${interpreter}" not found on PATH (${errno.message}) -- trying "${nextInterpreter}"`);
+                this.spawnChild(address, interpreterIndex + 1);
+                return;
+            }
             this.lastSpawnError = errno;
             this.log(`sidecar process failed to spawn: ${errno.message}`);
         });
@@ -326,16 +359,6 @@ export class SidecarManager implements vscode.Disposable {
             this.log('sidecar exited unexpectedly -- triggering recovery');
             void this.restart('sidecar process exited unexpectedly');
         });
-
-        const socket = await connectWithRetry(address, this.connectFn, this.connectRetryAttempts, this.connectRetryDelayMs);
-        this.socket = socket;
-        this.buffer = '';
-        socket.on('data', (chunk: Buffer) => this.onData(chunk));
-        socket.on('error', (err) => this.log(`socket error: ${err.message}`));
-
-        this.heartbeatTimer = setInterval(() => {
-            void this.heartbeatTick();
-        }, HEARTBEAT_INTERVAL_MS);
     }
 
     /**

@@ -108,6 +108,32 @@ suite('sidecar/SidecarManager (crash recovery)', () => {
         assert.strictEqual(args[6], 'http://localhost:11434');
     });
 
+    // Marketplace-readiness gate finding (code-reviewer): `python` alone is
+    // missing on PATH on many non-Windows setups (python3-only distros/macOS
+    // installs) -- this closes that gap.
+    test('falls back to python3 when python ENOENTs, and succeeds without a full restart cycle', async () => {
+        const fakeChildren: FakeChildProcess[] = [];
+        spawnStub.callsFake(() => {
+            const child = createFakeChildProcess();
+            fakeChildren.push(child);
+            if (fakeChildren.length === 1) {
+                process.nextTick(() => {
+                    const err = Object.assign(new Error('spawn python ENOENT'), { code: 'ENOENT' });
+                    child.emit('error', err);
+                });
+            }
+            return child as unknown as cp.ChildProcess;
+        });
+        stubConnectAlwaysSucceeds(connectStub);
+
+        manager = makeManager(output, spawnStub, connectStub);
+        await manager.start();
+
+        assert.strictEqual(spawnStub.callCount, 2, 'expected a second spawn attempt after the first ENOENTs');
+        assert.strictEqual(spawnStub.firstCall.args[0], 'python');
+        assert.strictEqual(spawnStub.secondCall.args[0], 'python3');
+    });
+
     test('an unexpected child exit triggers automatic recovery and reconnects', async () => {
         const fakeChildren: FakeChildProcess[] = [];
         spawnStub.callsFake(() => {
@@ -280,6 +306,30 @@ suite('sidecar/SidecarManager (crash recovery)', () => {
             assert.match(description, /Python is installed and on PATH/);
         });
 
+        test('python AND python3 both ENOENT still classifies as spawn-failed, from the last candidate\'s error', async () => {
+            const fakeChildren: FakeChildProcess[] = [];
+            spawnStub.callsFake(() => {
+                const child = createFakeChildProcess();
+                fakeChildren.push(child);
+                process.nextTick(() => {
+                    const err = Object.assign(new Error(`spawn ${fakeChildren.length === 1 ? 'python' : 'python3'} ENOENT`), {
+                        code: 'ENOENT',
+                    });
+                    child.emit('error', err);
+                });
+                return child as unknown as cp.ChildProcess;
+            });
+            stubConnectAlwaysFails(connectStub);
+
+            manager = makeManager(output, spawnStub, connectStub);
+            await assert.rejects(() => manager!.start());
+
+            assert.strictEqual(spawnStub.callCount, 2, 'expected the python3 fallback to have been tried too');
+            const { cause } = classifyAndDescribe(manager);
+            assert.strictEqual(cause, 'spawn-failed');
+            assert.match(internals(manager).lastSpawnError!.message, /spawn python3 ENOENT/);
+        });
+
         test('a child that already exited before listening classifies as process-crashed', async () => {
             const fakeChildren: FakeChildProcess[] = [];
             spawnStub.callsFake(() => {
@@ -324,10 +374,14 @@ suite('sidecar/SidecarManager (crash recovery)', () => {
         async function () {
             this.timeout(90_000); // real backoff delays (up to ~54s) -- see the pre-existing give-up test above
 
+            // Every candidate interpreter ENOENTs here (python AND its
+            // python3 fallback), so each of the MAX_RESTART_ATTEMPTS restart
+            // attempts now spawns twice before giving up on that attempt --
+            // 5 attempts x 2 candidates = 10 total spawn calls.
             spawnStub.callsFake(() => {
                 const child = createFakeChildProcess();
                 process.nextTick(() => {
-                    const err = Object.assign(new Error('spawn python ENOENT'), { code: 'ENOENT' });
+                    const err = Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' });
                     child.emit('error', err);
                 });
                 return child as unknown as cp.ChildProcess;
@@ -338,7 +392,7 @@ suite('sidecar/SidecarManager (crash recovery)', () => {
             const gaveUp = await manager.restart('test spawn failure loop');
 
             assert.strictEqual(gaveUp, false);
-            assert.strictEqual(spawnStub.callCount, 5);
+            assert.strictEqual(spawnStub.callCount, 10, 'MAX_RESTART_ATTEMPTS x SPAWN_INTERPRETER_CANDIDATES.length');
             assert.strictEqual(showErrorMessageStub.callCount, 1);
 
             const toastMessage = showErrorMessageStub.firstCall.args[0] as string;

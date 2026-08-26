@@ -83,6 +83,11 @@ export async function refreshExplanation(
     } catch (err) {
         output.appendLine(`manual refresh failed for ${resolved.fnId}: ${String(err)}`);
         vscode.window.showErrorMessage(`LucidHover: refresh failed for ${resolved.name}. See the LucidHover output channel.`);
+        // Session 58, code-reviewer finding: without this, a regenerate
+        // triggered from the panel's own Regenerate button left it stuck
+        // disabled with a spinning icon on failure -- only a successful
+        // regeneration's showRow() call above ever cleared that busy state.
+        panel.notifyRegenerateFailed();
     }
 }
 

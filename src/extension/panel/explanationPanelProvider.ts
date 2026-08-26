@@ -3,9 +3,11 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { ExplanationCache, CacheRow } from '../cache/explanationCache';
 import { EMBEDDING_MODEL_ID, PROMPT_VERSION, resolveModelId } from '../cache/config';
+import { DirtyTracker } from '../dirtyTracking';
 import { resolveEnclosingFunction, ResolvedFunction } from '../functionResolution';
 import { isSupportedLanguageId } from '../languages';
 import { SidecarManager } from '../sidecar/sidecarManager';
+import { StaleTracker } from '../staleTracking';
 
 export const EXPLANATION_PANEL_VIEW_ID = 'lucidhover.explanationPanel';
 export const SHOW_MORE_COMMAND_ID = 'lucidhover.showMore';
@@ -20,7 +22,10 @@ export const SHOW_CALL_TRACE_COMMAND_ID = 'lucidhover.traceExecutionPath';
 // `ExplanationPanelProvider`) so the panel's new "Regenerate" button can
 // forward its tracked `currentFunction` without a circular import.
 export const REFRESH_COMMAND_ID = 'lucidhover.refreshExplanation';
-const NAVIGATE_COMMAND_ID = 'lucidhover.navigateToFunction';
+// Session 58: exported (previously module-private) so
+// explanationPanelProvider.test.ts's "Back to caller" coverage can assert
+// on it directly, same as the other command ids above.
+export const NAVIGATE_COMMAND_ID = 'lucidhover.navigateToFunction';
 
 interface ExplanationFields {
     why_it_exists?: string;
@@ -134,6 +139,65 @@ function fnNameFromFnId(fnId: string): string {
     return segments[segments.length - 1] || fnId;
 }
 
+/** The `relFile` half of a fn_id (see fnNameFromFnId's doc comment for the `${relFile}::${qualifiedName}` shape). */
+function relFileFromFnId(fnId: string): string {
+    const separatorIndex = fnId.indexOf('::');
+    return separatorIndex === -1 ? fnId : fnId.slice(0, separatorIndex);
+}
+
+/**
+ * Session 58 header redesign: the header meta row's kind label. Neither
+ * `ResolvedFunction` nor `CacheRow` carries the real `vscode.SymbolKind` the
+ * resolving document symbol had -- adding that would mean threading a new
+ * field through every cache row, including rows written before this
+ * session, and would still be unavailable for `showRow`'s push from hover's
+ * "Show more" link (no live `ResolvedFunction` there at all, see
+ * `currentFunction`'s own doc comment).
+ *
+ * An earlier version of this tried to infer "Method" vs "Function" from
+ * whether the fn_id's qualified name is dotted (nested in an enclosing
+ * scope). code-reviewer caught that this is wrong for a case this codebase
+ * actually resolves: `flattenWithQualifiedNames` (functionResolution.ts)
+ * builds the qualified name from every enclosing *symbol*, not just class
+ * ancestors -- a named function nested inside another function (a closure)
+ * gets a dotted qualified name too, and VS Code's built-in JS/TS
+ * `DocumentSymbolProvider` genuinely nests such symbols (visible in the
+ * Outline view), so that case would have been mislabeled "Method". Always
+ * "Function" until real `SymbolKind` plumbing is worth doing.
+ */
+const KIND_LABEL = 'Function';
+
+/**
+ * Session 58: how long a "Back to caller" target stays valid for the
+ * bare-name match in `postRow` -- see `backTarget`'s own doc comment for
+ * why this exists (bounds a same-name-collision false-positive window,
+ * doesn't eliminate it). Generous relative to how long navigation actually
+ * takes (sidecar resolve or symbol search + document open, well under a
+ * second in practice), so it never expires before a genuine "Back to
+ * caller" click's own render arrives.
+ */
+const BACK_TARGET_TTL_MS = 15_000;
+
+/**
+ * Mirrors `functionHoverProvider.ts`'s own `freshnessOf`/`FreshnessState`
+ * exactly (dirty takes precedence over stale) -- not imported from there to
+ * avoid a circular import (that module already imports
+ * `SHOW_MORE_COMMAND_ID` from this one). Session 58: previously unused here:
+ * the panel is cache-only (Core Rule 4) but had never actually read
+ * `DirtyTracker`/`StaleTracker`, so its footer had no way to reflect a stale
+ * cache entry -- see the doc's P7.
+ */
+type FreshnessState = 'fresh' | 'dirty' | 'stale';
+function freshnessOf(dirty: boolean, stale: boolean): FreshnessState {
+    if (dirty) {
+        return 'dirty';
+    }
+    if (stale) {
+        return 'stale';
+    }
+    return 'fresh';
+}
+
 /**
  * Docked WebviewView for explanation levels 1-2 (Session 7). Content syncs to
  * the function under the cursor, but is cache-only, same as hover -- it must
@@ -169,20 +233,77 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
      * explicitly leave it.
      */
     private pinned = false;
+    /**
+     * Session 58 ("Back to caller"): set right before forwarding a clicked
+     * used-by/calls row's navigation, from whatever function was on screen
+     * at the time (`currentFunction`, same cursor-sync-only availability as
+     * that field -- no backTarget gets set from a hover-pushed row, since
+     * there's no live location to remember). `targetName` is the bare name
+     * that was clicked, i.e. the function we expect to land on; `postRow`
+     * only surfaces this as a "Back to X" affordance when the row it's
+     * about to render actually matches `targetName` (see postRow). Deliberately
+     * a single slot, not a history stack: one hop back, not a full
+     * breadcrumb trail.
+     *
+     * code-reviewer finding: matching on bare name alone (via
+     * `fnNameFromFnId`, which strips file and enclosing-scope qualification)
+     * means a *different* function that happens to share that bare name --
+     * elsewhere in the same file, a different class, or even a real
+     * `assignFnIds` `#n` duplicate -- would incorrectly surface "Back to X"
+     * if the user navigated to it independently while a stale backTarget
+     * was still sitting here unconsumed. The link would still navigate
+     * somewhere real and coherent if clicked (the exact relFile+line is
+     * what's stored), so this is a mislabeling risk, not a broken action or
+     * data issue -- but resolving it precisely would mean plumbing the
+     * navigation command's actual resolved destination back into the panel
+     * (`navigateToFunction` currently only forwards a bare name string, by
+     * design -- it's a separately-registered, fire-and-forget VS Code
+     * command). `BACK_TARGET_TTL_MS` bounds the exposure window instead:
+     * navigation (sidecar resolve or symbol search + document open) is
+     * effectively instant in practice, so requiring the match to also be
+     * recent makes an unrelated same-named function coincidentally being
+     * visited in that split-second window the only way to hit the false
+     * positive, rather than "any time before the next real navigate click."
+     */
+    private backTarget: { relFile: string; line: number; callerName: string; targetName: string; setAt: number } | undefined;
 
     constructor(
+        private readonly extensionUri: vscode.Uri,
         private readonly getWorkspaceRoot: () => string | undefined,
         private readonly getCache: () => ExplanationCache | undefined,
+        private readonly getDirtyTracker: () => DirtyTracker | undefined,
+        private readonly getStaleTracker: () => StaleTracker | undefined,
         private readonly output: vscode.OutputChannel
     ) {}
 
     resolveWebviewView(webviewView: vscode.WebviewView): void {
         this.view = webviewView;
-        webviewView.webview.options = { enableScripts: true };
+        webviewView.webview.options = {
+            enableScripts: true,
+            // Session 58: codicon.css/codicon.ttf load from the extension's
+            // own node_modules via asWebviewUri (renderHtml below) -- must be
+            // explicitly allowlisted, unlike the fully-inline HTML/CSS/JS
+            // this webview used before.
+            localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, 'node_modules', '@vscode', 'codicons', 'dist')],
+        };
         webviewView.webview.html = this.renderHtml(webviewView.webview);
 
         webviewView.webview.onDidReceiveMessage((message: { type?: string; name?: string }) => {
             if (message?.type === 'navigate' && message.name) {
+                // Session 58 ("Back to caller"): remember where we're
+                // navigating FROM, keyed to the name we're navigating TO,
+                // before forwarding the navigation itself -- see
+                // backTarget's own doc comment for why this is a single
+                // slot, not a stack, and how it self-invalidates.
+                if (this.currentFunction) {
+                    this.backTarget = {
+                        relFile: this.currentFunction.relFile,
+                        line: this.currentFunction.range.start.line,
+                        callerName: this.currentFunction.name,
+                        targetName: message.name,
+                        setAt: Date.now(),
+                    };
+                }
                 void vscode.commands.executeCommand(NAVIGATE_COMMAND_ID, message.name);
             } else if (message?.type === 'showBlastRadius') {
                 void vscode.commands.executeCommand(SHOW_BLAST_RADIUS_COMMAND_ID, this.currentFunction);
@@ -192,6 +313,12 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
                 void vscode.commands.executeCommand(REFRESH_COMMAND_ID, this.currentFunction);
             } else if (message?.type === 'copy' && typeof (message as { text?: unknown }).text === 'string') {
                 void vscode.env.clipboard.writeText((message as { text: string }).text);
+            } else if (message?.type === 'backToCaller') {
+                const target = this.backTarget;
+                this.backTarget = undefined;
+                if (target) {
+                    void this.navigateToLocation(target.relFile, target.line);
+                }
             } else if (message?.type === 'back') {
                 this.pinned = false;
                 this.refreshFromActiveEditor();
@@ -260,6 +387,48 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
         await vscode.commands.executeCommand(`${EXPLANATION_PANEL_VIEW_ID}.focus`);
     }
 
+    /**
+     * Session 58, code-reviewer finding: `refreshExplanation`'s catch block
+     * calls this after a failed regenerate so the card's Regenerate/Copy
+     * buttons don't stay stuck disabled with a spinning icon forever -- the
+     * only other thing that clears that busy state is a fresh 'render'/
+     * 'empty' message, which a failure never sends. A no-op if there's no
+     * view to post to; harmless if the panel has since moved on to a
+     * different function or a graph view, since the webview only touches
+     * the specific button references it tracked when it last rendered a
+     * card (see the webview script's activeRegenerateBtn/activeCopyBtn).
+     */
+    notifyRegenerateFailed(): void {
+        if (!this.view) {
+            return;
+        }
+        void this.view.webview.postMessage({ type: 'regenerateFailed' });
+    }
+
+    /**
+     * Session 58: forces a cursor-sync refresh from whatever the active
+     * editor is right now, the same fix `navigateToLocation` applies to its
+     * own selection-setting -- `onDidChangeTextEditorSelection` doesn't fire
+     * when the selection a caller sets happens to already match what the
+     * editor had, so anything that navigates by setting `editor.selection`
+     * directly (rather than going through this class) can't rely on that
+     * event alone to refresh the panel. Exposed for
+     * `registerNavigateToFunctionCommand` below, which sets selection itself
+     * and has no other way to guarantee the panel picks up the change --
+     * confirmed via a real user report that clicking a used-by/calls row
+     * for a function whose location the cursor was already sitting at (or
+     * had recently visited) left the panel showing the previous
+     * explanation. A no-op if there's nothing to refresh from (not pinned
+     * to a graph, a real active editor exists); harmless if a real
+     * selection-changed event also fires for the same navigation.
+     */
+    refreshNow(): void {
+        if (this.pinned) {
+            return;
+        }
+        this.refreshFromActiveEditor();
+    }
+
     /** Cursor-sync entry point. Only does work while the panel is actually visible and not pinned to a graph view. */
     onSelectionChanged(editor: vscode.TextEditor): void {
         if (!this.view?.visible || this.pinned) {
@@ -314,11 +483,32 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
             return;
         }
         const explanation = JSON.parse(row.explanation_json) as ExplanationFields;
+        const relFile = relFileFromFnId(row.fn_id);
+        // Works for both refreshFor's cursor-synced path and showRow's push
+        // from hover's "Show more" link, since both give us a fn_id and this
+        // doesn't need a live ResolvedFunction -- see currentFunction's own
+        // doc comment on why showRow can't provide one.
+        const dirty = this.getDirtyTracker()?.dirtyFnIdsFor(relFile)?.has(row.fn_id) ?? false;
+        const stale = this.getStaleTracker()?.isStale(relFile, row.fn_id) ?? false;
+        // "Back to caller" only surfaces when this row is actually the
+        // function the last navigate click targeted, AND recent (see
+        // BACK_TARGET_TTL_MS's own doc comment -- name alone can't fully
+        // rule out an unrelated same-named function, so recency bounds that
+        // window instead of eliminating it).
+        const fnName = fnNameFromFnId(row.fn_id);
+        const backTo =
+            this.backTarget?.targetName === fnName && Date.now() - this.backTarget.setAt < BACK_TARGET_TTL_MS
+                ? this.backTarget.callerName
+                : undefined;
         void this.view.webview.postMessage({
             type: 'render',
-            fnName: fnNameFromFnId(row.fn_id),
+            fnName,
+            kind: KIND_LABEL,
+            relFile,
             explanation,
             generatedAt: row.generated_at,
+            freshness: freshnessOf(dirty, stale),
+            backTo,
         });
     }
 
@@ -336,11 +526,51 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
         void this.view.webview.postMessage({ type: 'renderGraph', payload });
     }
 
+    /**
+     * Session 58 ("Back to caller"): navigates directly to a remembered
+     * exact location (relFile + line) rather than going through
+     * `NAVIGATE_COMMAND_ID`'s bare-name resolution -- we already know
+     * precisely where the caller was (captured from a live
+     * `ResolvedFunction` at click time), so there's no ambiguity to
+     * resolve. Mirrors `registerNavigateToFunctionCommand`'s own
+     * open-reveal-select sequence below, plus an explicit `refreshNow()`
+     * call at the end -- a real user report found the panel sometimes
+     * stayed on the old function after a same-file "Back to caller" jump,
+     * because `onDidChangeTextEditorSelection` doesn't fire when the editor
+     * already happens to be showing that exact selection (e.g. reusing an
+     * already-open, already-positioned tab), so `onSelectionChanged`'s
+     * event-driven refresh never ran. This makes the panel update
+     * unconditional instead of depending on that event firing; see
+     * `refreshNow`'s own doc comment.
+     */
+    private async navigateToLocation(relFile: string, line: number): Promise<void> {
+        const workspaceRoot = this.getWorkspaceRoot();
+        if (!workspaceRoot) {
+            return;
+        }
+        const uri = vscode.Uri.file(path.join(workspaceRoot, relFile));
+        const document = await vscode.workspace.openTextDocument(uri);
+        const editor = await vscode.window.showTextDocument(document, { preview: false });
+        const position = new vscode.Position(line, 0);
+        editor.selection = new vscode.Selection(position, position);
+        editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenter);
+        this.refreshNow();
+    }
+
     private renderHtml(webview: vscode.Webview): string {
         const nonce = crypto.randomBytes(16).toString('hex');
+        const codiconUri = webview.asWebviewUri(
+            vscode.Uri.joinPath(this.extensionUri, 'node_modules', '@vscode', 'codicons', 'dist', 'codicon.css')
+        );
         const csp = [
             "default-src 'none'",
-            "style-src 'unsafe-inline'",
+            // 'unsafe-inline' for this file's own inline <style> block;
+            // webview.cspSource additionally for the codicon.css stylesheet
+            // link below, which loads from the extension itself, not inline.
+            `style-src ${webview.cspSource} 'unsafe-inline'`,
+            // codicon.css's own @font-face rule points at codicon.ttf,
+            // served from the same extension origin.
+            `font-src ${webview.cspSource}`,
             `script-src 'nonce-${nonce}'`,
         ].join('; ');
 
@@ -349,6 +579,7 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
 <head>
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy" content="${csp}">
+<link rel="stylesheet" href="${codiconUri}">
 <style>
     body {
         font-family: var(--vscode-font-family);
@@ -431,6 +662,219 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
         padding-top: 8px;
         border-top: 1px solid var(--vscode-widget-border, transparent);
     }
+
+    /* ── Session 58 card redesign (single-explanation view only) ─────────
+       Ported from lucidhover-ui-improvements.md / lucidhover-card-redesign.html.
+       renderGraph/renderTrace/renderBranchPoint above are untouched -- this
+       redesign's scope is the single-explanation view (renderExplanation)
+       only, per the doc's own title. Deliberately no .lh-card max-width cap
+       here (the reference file's 460px is sized for a hover-tooltip-shaped
+       card; this is the always-visible docked panel, which should use
+       whatever width the user's sidebar actually gives it). */
+    .lh-card {
+        background: var(--vscode-editorHoverWidget-background, var(--vscode-editorWidget-background));
+        border: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-editorWidget-border));
+        border-radius: 6px;
+        overflow: hidden;
+    }
+    .lh-header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 8px;
+        padding: 10px 12px 8px;
+    }
+    .lh-title-row {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        min-width: 0;
+    }
+    .lh-kind-icon {
+        font-size: 16px;
+        /* Always the function icon today (see KIND_LABEL's doc comment) --
+           functionForeground first, methodForeground as fallback in case
+           SymbolKind plumbing gets added back later. */
+        color: var(--vscode-symbolIcon-functionForeground, var(--vscode-symbolIcon-methodForeground, inherit));
+        flex-shrink: 0;
+    }
+    .lh-name {
+        font-family: var(--vscode-editor-font-family);
+        font-size: calc(var(--vscode-font-size) + 1px);
+        font-weight: 600;
+        background: var(--vscode-textCodeBlock-background);
+        padding: 1px 6px;
+        border-radius: 4px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .lh-meta {
+        margin-top: 4px;
+        margin-left: 23px;
+        font-size: 11px;
+        color: var(--vscode-descriptionForeground);
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+    }
+    .lh-meta .lh-file { color: var(--vscode-textLink-foreground); }
+    .lh-actions { display: flex; gap: 4px; flex-shrink: 0; margin-left: auto; }
+    .lh-btn {
+        appearance: none;
+        border: none;
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        padding: 3px 10px;
+        border-radius: 4px;
+        cursor: pointer;
+        font-family: var(--vscode-font-family);
+        font-size: calc(var(--vscode-font-size) - 1px);
+        line-height: 18px;
+        color: var(--vscode-button-secondaryForeground);
+        background: var(--vscode-button-secondaryBackground);
+    }
+    .lh-btn:hover { background: var(--vscode-button-secondaryHoverBackground); }
+    .lh-btn:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
+    .lh-btn .codicon { font-size: 13px; }
+    .lh-btn.is-busy { opacity: 0.7; cursor: default; }
+    .lh-btn.is-busy .codicon-sync { animation: lh-spin 1s linear infinite; }
+    @keyframes lh-spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) {
+        .lh-btn.is-busy .codicon-sync { animation: none; }
+        .lh-nav .codicon { transition: none; }
+    }
+    .lh-section { padding: 8px 12px 10px; }
+    .lh-section + .lh-section {
+        border-top: 1px solid var(--vscode-widget-border, rgba(128, 128, 128, 0.2));
+    }
+    .lh-section-title {
+        font-size: 11px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--vscode-sideBarSectionHeader-foreground, var(--vscode-descriptionForeground));
+        margin-bottom: 6px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+    }
+    .lh-count {
+        background: var(--vscode-badge-background);
+        color: var(--vscode-badge-foreground);
+        border-radius: 8px;
+        padding: 0 6px;
+        font-size: 10px;
+        font-weight: 400;
+        line-height: 16px;
+        text-transform: none;
+        letter-spacing: 0;
+    }
+    .lh-body { max-width: 60ch; }
+    .lh-body code {
+        font-family: var(--vscode-editor-font-family);
+        font-size: 0.92em;
+        background: var(--vscode-textCodeBlock-background);
+        padding: 0 4px;
+        border-radius: 3px;
+    }
+    .lh-refs { list-style: none; }
+    .lh-refs button.lh-ref-row {
+        appearance: none;
+        border: none;
+        width: 100%;
+        text-align: left;
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        padding: 3px 6px;
+        margin: 0 -6px;
+        border-radius: 4px;
+        color: var(--vscode-foreground);
+        background: transparent;
+        font: inherit;
+        cursor: pointer;
+    }
+    .lh-refs button.lh-ref-row:hover { background: var(--vscode-list-hoverBackground); }
+    .lh-refs button.lh-ref-row:focus-visible {
+        outline: 1px solid var(--vscode-focusBorder);
+        outline-offset: -1px;
+    }
+    .lh-refs .codicon { color: var(--vscode-symbolIcon-methodForeground, inherit); flex-shrink: 0; }
+    .lh-nav-list { margin-top: 6px; display: flex; flex-direction: column; gap: 1px; }
+    .lh-nav {
+        appearance: none;
+        border: none;
+        background: transparent;
+        padding: 2px 0;
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        color: var(--vscode-textLink-foreground);
+        text-decoration: none;
+        font: inherit;
+        cursor: pointer;
+    }
+    .lh-nav:hover { color: var(--vscode-textLink-activeForeground); text-decoration: underline; }
+    .lh-nav:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
+    .lh-nav .codicon { font-size: 12px; transition: transform 80ms ease; }
+    .lh-nav:hover .codicon { transform: translateX(2px); }
+    /* "Back to caller" -- sits above .lh-card, not inside it, so it reads
+       as a breadcrumb rather than another card action. */
+    .lh-back {
+        appearance: none;
+        border: none;
+        background: transparent;
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        margin-bottom: 6px;
+        padding: 2px 0;
+        color: var(--vscode-textLink-foreground);
+        text-decoration: none;
+        font: inherit;
+        cursor: pointer;
+    }
+    .lh-back:hover { color: var(--vscode-textLink-activeForeground); text-decoration: underline; }
+    .lh-back:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
+    .lh-back .codicon { font-size: 12px; }
+    .lh-empty {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        color: var(--vscode-descriptionForeground);
+        font-size: calc(var(--vscode-font-size) - 1px);
+    }
+    .lh-empty .codicon-check { color: var(--vscode-testing-iconPassed, var(--vscode-charts-green)); }
+    .lh-flags { list-style: none; display: flex; flex-direction: column; gap: 4px; }
+    .lh-flags li { display: flex; gap: 7px; align-items: baseline; }
+    .lh-flags .codicon {
+        font-size: 12px;
+        color: var(--vscode-problemsWarningIcon-foreground, var(--vscode-editorWarning-foreground));
+        position: relative;
+        top: 1px;
+    }
+    .lh-footer {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        padding: 6px 12px;
+        border-top: 1px solid var(--vscode-widget-border, rgba(128, 128, 128, 0.2));
+        font-size: 11px;
+        color: var(--vscode-descriptionForeground);
+    }
+    .lh-footer .codicon {
+        color: var(--vscode-problemsWarningIcon-foreground, var(--vscode-editorWarning-foreground));
+        flex-shrink: 0;
+    }
+    /* Stale/dirty state: explanation may not reflect the file's current
+       content -- session 58 extends the doc's P7 (which only names "stale")
+       to also cover "dirty" (an unsaved in-memory edit), since the panel now
+       has access to the same DirtyTracker/StaleTracker hover already reads
+       (see freshnessOf's doc comment). */
+    .lh-footer.is-stale, .lh-footer.is-dirty { color: var(--vscode-editorWarning-foreground, inherit); }
 </style>
 </head>
 <body>
@@ -439,8 +883,20 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
 (function () {
     const vscode = acquireVsCodeApi();
     const content = document.getElementById('content');
+    // Session 58: tracks the currently-rendered card's Regenerate/Copy
+    // buttons so a 'regenerateFailed' message (see the extension-host side's
+    // notifyRegenerateFailed) can clear the busy state left behind by a
+    // failed regeneration without discarding the still-valid old
+    // explanation already on screen. Reset to undefined by every render
+    // path that replaces the card (renderEmpty/renderGraph/renderTrace),
+    // not just renderExplanation, so a stale reference from a since-replaced
+    // card is never touched.
+    let activeRegenerateBtn;
+    let activeCopyBtn;
 
     function clear() {
+        activeRegenerateBtn = undefined;
+        activeCopyBtn = undefined;
         while (content.firstChild) {
             content.removeChild(content.firstChild);
         }
@@ -484,7 +940,7 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
         content.appendChild(ul);
     }
 
-    // Session 55: plain relative-time text ("generated 3 days ago") for the
+    // Session 55: plain relative-time text ("3 days ago") for the
     // single-explanation view's generated_at timestamp -- coarse buckets
     // are enough here, no need for a library.
     function relativeTime(isoString) {
@@ -503,10 +959,18 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
         for (const [name, secondsPerUnit] of units) {
             const value = Math.floor(seconds / secondsPerUnit);
             if (value >= 1) {
-                return 'generated ' + value + ' ' + name + (value === 1 ? '' : 's') + ' ago';
+                return value + ' ' + name + (value === 1 ? '' : 's') + ' ago';
             }
         }
-        return 'generated just now';
+        return 'just now';
+    }
+
+    // Session 58: the same timestamp's absolute form, for the meta row's
+    // title tooltip (doc section 5.1) -- locale-formatted rather than raw
+    // ISO, since this is the human-facing tooltip, not a machine value.
+    function absoluteTime(isoString) {
+        const then = new Date(isoString);
+        return Number.isNaN(then.getTime()) ? '' : then.toLocaleString();
     }
 
     // Session 55: plain-text rendering of the currently-displayed explanation
@@ -526,6 +990,8 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
         }
         if (Array.isArray(explanation.side_effects) && explanation.side_effects.length > 0) {
             lines.push('', 'Side effects:', explanation.side_effects.map((s) => '- ' + s).join('\\n'));
+        } else {
+            lines.push('', 'Side effects:', 'None detected -- pure function');
         }
         if (explanation.risk_note) {
             lines.push('', 'Risk:', explanation.risk_note);
@@ -543,75 +1009,276 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
         content.appendChild(p);
     }
 
-    function renderExplanation(fnName, explanation, generatedAt) {
-        clear();
-        const h = document.createElement('h3');
-        h.textContent = fnName;
-        content.appendChild(h);
+    function codicon(name) {
+        const s = document.createElement('span');
+        s.className = 'codicon codicon-' + name;
+        s.setAttribute('aria-hidden', 'true');
+        return s;
+    }
 
+    function sectionTitle(text, countBadge) {
+        const h = document.createElement('h2');
+        h.className = 'lh-section-title';
+        h.appendChild(document.createTextNode(text));
+        if (countBadge !== undefined) {
+            const badge = document.createElement('span');
+            badge.className = 'lh-count';
+            badge.textContent = String(countBadge);
+            h.appendChild(badge);
+        }
+        return h;
+    }
+
+    // A single "used by" / "calls" row -- a labeled button (not a link) so
+    // it stays keyboard-focusable and works with no href/navigation target
+    // of its own; clicking posts the same 'navigate' message the old
+    // name-link buttons already used.
+    function refRow(name) {
+        const li = document.createElement('li');
+        const btn = document.createElement('button');
+        btn.className = 'lh-ref-row';
+        btn.appendChild(codicon('symbol-method'));
+        btn.appendChild(document.createTextNode(name));
+        btn.addEventListener('click', () => {
+            vscode.postMessage({ type: 'navigate', name: name });
+        });
+        li.appendChild(btn);
+        return li;
+    }
+
+    function refList(names) {
+        const ul = document.createElement('ul');
+        ul.className = 'lh-refs';
+        for (const name of names.slice(0, 3)) {
+            ul.appendChild(refRow(name));
+        }
+        return ul;
+    }
+
+    function navButton(command, label) {
+        const btn = document.createElement('button');
+        btn.className = 'lh-nav';
+        btn.appendChild(document.createTextNode(label + ' '));
+        btn.appendChild(codicon('chevron-right'));
+        btn.addEventListener('click', () => {
+            vscode.postMessage({ type: command });
+        });
+        return btn;
+    }
+
+    // Session 58 card redesign (single-explanation view only -- see the CSS
+    // block's own header comment). Ported from
+    // lucidhover-ui-improvements.md / lucidhover-card-redesign.html, with
+    // two content deviations documented in the session artifact: calls
+    // and risk_note are real existing fields the doc's 5-zone target
+    // structure doesn't mention at all (not one of its P1-P7 problems) --
+    // kept and restyled to match the new system rather than silently
+    // dropped, since removing working functionality wasn't asked for.
+    function renderExplanation(fnName, kind, relFile, explanation, generatedAt, freshness, backTo) {
+        clear();
+
+        // Session 58 ("Back to caller"): a one-hop way back after clicking
+        // a used-by/calls row, for the same-file case where VS Code's own
+        // "Go Back" (Alt+Left) navigation doesn't help (no document change
+        // to record). Sits above the card, not inside its header, so it
+        // doesn't compete with Regenerate/Copy as another header action.
+        if (backTo) {
+            const backLink = document.createElement('button');
+            backLink.className = 'lh-back';
+            backLink.appendChild(codicon('chevron-left'));
+            backLink.appendChild(document.createTextNode('Back to ' + backTo));
+            backLink.addEventListener('click', () => {
+                vscode.postMessage({ type: 'backToCaller' });
+            });
+            content.appendChild(backLink);
+        }
+
+        const card = document.createElement('div');
+        card.className = 'lh-card';
+        card.setAttribute('role', 'document');
+        card.setAttribute('aria-label', 'Explanation of ' + fnName);
+
+        // ── Header ──────────────────────────────────────────────
+        const header = document.createElement('header');
+        header.className = 'lh-header';
+
+        const titleWrap = document.createElement('div');
+        const titleRow = document.createElement('div');
+        titleRow.className = 'lh-title-row';
+        // 'kind' is currently always "Function" (see KIND_LABEL's doc
+        // comment on why the Method/Function distinction was dropped);
+        // kept as a param rather than hardcoded here so restoring the
+        // distinction later, if real SymbolKind plumbing gets added, is a
+        // caller-side change only.
+        const kindIcon = codicon(kind === 'Method' ? 'symbol-method' : 'symbol-function');
+        kindIcon.classList.add('lh-kind-icon');
+        titleRow.appendChild(kindIcon);
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'lh-name';
+        nameSpan.textContent = fnName;
+        titleRow.appendChild(nameSpan);
+        titleWrap.appendChild(titleRow);
+
+        const meta = document.createElement('div');
+        meta.className = 'lh-meta';
+        const kindSpan = document.createElement('span');
+        kindSpan.textContent = kind;
+        meta.appendChild(kindSpan);
+        if (relFile) {
+            const dot1 = document.createElement('span');
+            dot1.setAttribute('aria-hidden', 'true');
+            dot1.textContent = '·';
+            meta.appendChild(dot1);
+            const fileSpan = document.createElement('span');
+            fileSpan.className = 'lh-file';
+            fileSpan.textContent = relFile;
+            meta.appendChild(fileSpan);
+        }
         const relTime = typeof generatedAt === 'string' ? relativeTime(generatedAt) : null;
         if (relTime) {
-            addParagraph(relTime, 'timestamp');
+            const dot2 = document.createElement('span');
+            dot2.setAttribute('aria-hidden', 'true');
+            dot2.textContent = '·';
+            meta.appendChild(dot2);
+            const timeSpan = document.createElement('span');
+            timeSpan.textContent = relTime;
+            timeSpan.title = absoluteTime(generatedAt);
+            meta.appendChild(timeSpan);
         }
+        titleWrap.appendChild(meta);
+        header.appendChild(titleWrap);
 
-        // Empty/null fields render as nothing -- omit the whole section,
-        // never a placeholder like "N/A" (silence means confirmed-none).
-        if (explanation.why_it_exists) {
-            addSection('Why it exists');
-            addParagraph(explanation.why_it_exists);
-        }
-        if (Array.isArray(explanation.used_by) && explanation.used_by.length > 0) {
-            addSection('Used by');
-            addNameLinks(explanation.used_by);
-        }
-        const blastBtn = document.createElement('button');
-        blastBtn.className = 'name-link';
-        blastBtn.textContent = 'See full blast radius →';
-        blastBtn.addEventListener('click', () => {
-            vscode.postMessage({ type: 'showBlastRadius' });
-        });
-        content.appendChild(blastBtn);
-        const traceBtn = document.createElement('button');
-        traceBtn.className = 'name-link';
-        traceBtn.textContent = 'Trace execution from here →';
-        traceBtn.addEventListener('click', () => {
-            vscode.postMessage({ type: 'traceExecutionPath' });
-        });
-        content.appendChild(traceBtn);
+        const actions = document.createElement('div');
+        actions.className = 'lh-actions';
         const regenerateBtn = document.createElement('button');
-        regenerateBtn.className = 'name-link';
-        regenerateBtn.textContent = 'Regenerate ↻';
+        regenerateBtn.className = 'lh-btn';
+        regenerateBtn.title = 'Regenerate explanation';
+        regenerateBtn.appendChild(codicon('sync'));
+        regenerateBtn.appendChild(document.createTextNode('Regenerate'));
+        const copyBtn = document.createElement('button');
+        copyBtn.className = 'lh-btn';
+        copyBtn.title = 'Copy explanation as Markdown';
+        copyBtn.appendChild(codicon('copy'));
+        copyBtn.appendChild(document.createTextNode('Copy'));
         regenerateBtn.addEventListener('click', () => {
+            // Busy state clears itself: the next 'render'/'empty' message
+            // this triggers rebuilds the whole card from scratch.
+            regenerateBtn.classList.add('is-busy');
+            regenerateBtn.disabled = true;
+            copyBtn.disabled = true;
             vscode.postMessage({ type: 'regenerate' });
         });
-        content.appendChild(regenerateBtn);
-        const copyBtn = document.createElement('button');
-        copyBtn.className = 'name-link';
-        copyBtn.textContent = 'Copy';
         copyBtn.addEventListener('click', () => {
             vscode.postMessage({ type: 'copy', text: explanationAsText(fnName, explanation) });
         });
-        content.appendChild(copyBtn);
-        if (Array.isArray(explanation.calls) && explanation.calls.length > 0) {
-            addSection('Calls');
-            addNameLinks(explanation.calls);
+        actions.appendChild(regenerateBtn);
+        actions.appendChild(copyBtn);
+        header.appendChild(actions);
+        activeRegenerateBtn = regenerateBtn;
+        activeCopyBtn = copyBtn;
+
+        card.appendChild(header);
+
+        // ── Why it exists ───────────────────────────────────────
+        if (explanation.why_it_exists) {
+            const section = document.createElement('section');
+            section.className = 'lh-section';
+            section.appendChild(sectionTitle('Why it exists'));
+            const body = document.createElement('p');
+            body.className = 'lh-body';
+            body.textContent = explanation.why_it_exists;
+            section.appendChild(body);
+            card.appendChild(section);
         }
-        if (Array.isArray(explanation.side_effects) && explanation.side_effects.length > 0) {
-            addSection('Side effects');
-            addList(explanation.side_effects);
+
+        // ── Used by ─────────────────────────────────────────────
+        const usedBy = Array.isArray(explanation.used_by) ? explanation.used_by : [];
+        const usedBySection = document.createElement('section');
+        usedBySection.className = 'lh-section';
+        if (usedBy.length > 0) {
+            usedBySection.appendChild(sectionTitle('Used by', usedBy.length));
+            usedBySection.appendChild(refList(usedBy));
         }
+        const navList = document.createElement('div');
+        navList.className = 'lh-nav-list';
+        navList.appendChild(navButton('showBlastRadius', 'See full blast radius'));
+        navList.appendChild(navButton('traceExecutionPath', 'Trace execution from here'));
+        usedBySection.appendChild(navList);
+        card.appendChild(usedBySection);
+
+        // ── Calls (kept -- see this function's own doc comment) ───
+        const calls = Array.isArray(explanation.calls) ? explanation.calls : [];
+        if (calls.length > 0) {
+            const section = document.createElement('section');
+            section.className = 'lh-section';
+            section.appendChild(sectionTitle('Calls', calls.length));
+            section.appendChild(refList(calls));
+            card.appendChild(section);
+        }
+
+        // ── Side effects -- always exactly one of two states (P5) ─
+        const sideEffects = Array.isArray(explanation.side_effects) ? explanation.side_effects : [];
+        const seSection = document.createElement('section');
+        seSection.className = 'lh-section';
+        seSection.appendChild(sectionTitle('Side effects'));
+        if (sideEffects.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'lh-empty';
+            empty.appendChild(codicon('check'));
+            empty.appendChild(document.createTextNode('None detected — pure function'));
+            seSection.appendChild(empty);
+        } else {
+            const ul = document.createElement('ul');
+            ul.className = 'lh-flags';
+            for (const effect of sideEffects) {
+                const li = document.createElement('li');
+                li.appendChild(codicon('warning'));
+                li.appendChild(document.createTextNode(effect));
+                ul.appendChild(li);
+            }
+            seSection.appendChild(ul);
+        }
+        card.appendChild(seSection);
+
+        // ── Risk (kept -- see this function's own doc comment) ────
         if (explanation.risk_note) {
-            addSection('Risk');
-            addParagraph(explanation.risk_note, 'risk-note');
+            const section = document.createElement('section');
+            section.className = 'lh-section';
+            section.appendChild(sectionTitle('Risk'));
+            const ul = document.createElement('ul');
+            ul.className = 'lh-flags';
+            const li = document.createElement('li');
+            li.appendChild(codicon('warning'));
+            li.appendChild(document.createTextNode(explanation.risk_note));
+            ul.appendChild(li);
+            section.appendChild(ul);
+            card.appendChild(section);
         }
-        // Session 52: persistent disclaimer -- every field above came from a
-        // local LLM call (Core Rule 1), not a static analyzer, so it can be
-        // wrong. Scoped to this single-explanation view only, not the graph
-        // views (renderGraph/renderTrace): those already show many nodes'
-        // explanations at once as compact one-line summaries, not a single
-        // reading pane, so a repeated per-node disclaimer would be noise
-        // rather than a one-time notice.
-        addParagraph('Generated by a local LLM — may be inaccurate, verify before relying on it.', 'disclaimer');
+
+        // ── Footer ──────────────────────────────────────────────
+        // Session 52's disclaimer, now extended (session 58) with the
+        // doc's P7 stale indicator -- plus 'dirty' (an unsaved in-memory
+        // edit), which the doc doesn't name but which this panel now has
+        // the same DirtyTracker/StaleTracker access hover already had (see
+        // freshnessOf's own doc comment for why this isn't imported from
+        // there).
+        const footer = document.createElement('footer');
+        footer.className = 'lh-footer';
+        footer.appendChild(codicon('warning'));
+        const footerText = document.createElement('span');
+        if (freshness === 'stale') {
+            footer.classList.add('is-stale');
+            footerText.textContent = 'Generated before the latest changes — consider regenerating.';
+        } else if (freshness === 'dirty') {
+            footer.classList.add('is-dirty');
+            footerText.textContent = 'This function has unsaved changes — the explanation may be outdated.';
+        } else {
+            footerText.textContent = 'Generated by a local LLM — may be inaccurate, verify before relying on it.';
+        }
+        footer.appendChild(footerText);
+        card.appendChild(footer);
+
+        content.appendChild(card);
     }
 
     function addBackLink() {
@@ -768,9 +1435,31 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
     window.addEventListener('message', (event) => {
         const message = event.data;
         if (message.type === 'render') {
-            renderExplanation(message.fnName, message.explanation, message.generatedAt);
+            renderExplanation(
+                message.fnName,
+                message.kind,
+                message.relFile,
+                message.explanation,
+                message.generatedAt,
+                message.freshness,
+                message.backTo
+            );
         } else if (message.type === 'empty') {
             renderEmpty(message.fnName);
+        } else if (message.type === 'regenerateFailed') {
+            // code-reviewer finding: a failed regeneration previously left
+            // Regenerate/Copy stuck disabled with a spinning icon forever,
+            // since only a fresh 'render'/'empty' message (which a failure
+            // never sends) cleared busy state. The still-valid old
+            // explanation stays on screen untouched -- only the two buttons
+            // are re-enabled.
+            if (activeRegenerateBtn) {
+                activeRegenerateBtn.classList.remove('is-busy');
+                activeRegenerateBtn.disabled = false;
+            }
+            if (activeCopyBtn) {
+                activeCopyBtn.disabled = false;
+            }
         } else if (message.type === 'renderGraph') {
             if (message.payload.direction === 'downstream') {
                 renderTrace(message.payload);
@@ -812,56 +1501,86 @@ interface ResolveFunctionResult {
  * user report: a genuinely correct, real caller name failed to navigate
  * because its file had never been opened, so VS Code's own symbol search
  * didn't know about it yet -- the sidecar did.
+ *
+ * `refreshPanel` (Session 58): called after every successful navigation --
+ * a real user report found that clicking a used-by/calls row for a function
+ * the cursor was already at (or had recently visited) navigated the editor
+ * correctly but left the panel showing the previous explanation, because
+ * this function sets `editor.selection` directly and `onSelectionChanged`'s
+ * event-driven refresh depends on `onDidChangeTextEditorSelection` actually
+ * firing, which it doesn't for a no-op selection change. See
+ * `ExplanationPanelProvider.refreshNow`'s own doc comment for the full
+ * mechanism (the same fix already applied to `navigateToLocation` there).
+ *
+ * Exported as a standalone function (Session 58), not just the inline
+ * `registerCommand` callback below, so tests can call it directly --
+ * matching session 45's `showBlastRadius`/`registerShowBlastRadiusCommand`
+ * split, for the identical reason: `registerCommand` throws "command
+ * already exists" inside this test harness, where the real extension is
+ * genuinely activated and has already registered `NAVIGATE_COMMAND_ID`.
  */
+export async function navigateToFunction(
+    name: string,
+    getWorkspaceRoot: () => string | undefined,
+    getSidecar: () => SidecarManager | undefined,
+    refreshPanel: () => void,
+    output: vscode.OutputChannel
+): Promise<void> {
+    const workspaceRoot = getWorkspaceRoot();
+    const sidecar = getSidecar();
+
+    if (workspaceRoot && sidecar) {
+        try {
+            const resolved = await sidecar.request<ResolveFunctionResult>('resolve_function', { name });
+            if (resolved.found && resolved.rel_fname !== undefined && resolved.line !== undefined) {
+                const uri = vscode.Uri.file(path.join(workspaceRoot, resolved.rel_fname));
+                const document = await vscode.workspace.openTextDocument(uri);
+                const editor = await vscode.window.showTextDocument(document, { preview: false });
+                const position = new vscode.Position(resolved.line, 0);
+                editor.selection = new vscode.Selection(position, position);
+                editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenter);
+                refreshPanel();
+                return;
+            }
+        } catch (err) {
+            output.appendLine(
+                `navigate: resolve_function failed for "${name}" (${String(err)}) -- ` +
+                    'falling back to workspace symbol search'
+            );
+        }
+    }
+
+    const symbols = await vscode.commands.executeCommand<vscode.SymbolInformation[]>(
+        'vscode.executeWorkspaceSymbolProvider',
+        name
+    );
+    // The built-in JS/TS workspace symbol provider names function-like
+    // symbols with a trailing "(...)" (e.g. "handleSignupRoute()"), so a
+    // bare-name exact match against `s.name` never matches -- strip it
+    // before comparing.
+    const match = symbols?.find((s) => s.name.split('(')[0] === name && isNavigableKind(s.kind));
+    if (!match) {
+        output.appendLine(`navigate: no symbol found for "${name}"`);
+        vscode.window.setStatusBarMessage(`LucidHover: couldn't find "${name}"`, 3000);
+        return;
+    }
+
+    const document = await vscode.workspace.openTextDocument(match.location.uri);
+    const editor = await vscode.window.showTextDocument(document, { preview: false });
+    editor.selection = new vscode.Selection(match.location.range.start, match.location.range.start);
+    editor.revealRange(match.location.range, vscode.TextEditorRevealType.InCenter);
+    refreshPanel();
+}
+
 export function registerNavigateToFunctionCommand(
     getWorkspaceRoot: () => string | undefined,
     getSidecar: () => SidecarManager | undefined,
+    refreshPanel: () => void,
     output: vscode.OutputChannel
 ): vscode.Disposable {
-    return vscode.commands.registerCommand(NAVIGATE_COMMAND_ID, async (name: string) => {
-        const workspaceRoot = getWorkspaceRoot();
-        const sidecar = getSidecar();
-
-        if (workspaceRoot && sidecar) {
-            try {
-                const resolved = await sidecar.request<ResolveFunctionResult>('resolve_function', { name });
-                if (resolved.found && resolved.rel_fname !== undefined && resolved.line !== undefined) {
-                    const uri = vscode.Uri.file(path.join(workspaceRoot, resolved.rel_fname));
-                    const document = await vscode.workspace.openTextDocument(uri);
-                    const editor = await vscode.window.showTextDocument(document, { preview: false });
-                    const position = new vscode.Position(resolved.line, 0);
-                    editor.selection = new vscode.Selection(position, position);
-                    editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenter);
-                    return;
-                }
-            } catch (err) {
-                output.appendLine(
-                    `navigate: resolve_function failed for "${name}" (${String(err)}) -- ` +
-                        'falling back to workspace symbol search'
-                );
-            }
-        }
-
-        const symbols = await vscode.commands.executeCommand<vscode.SymbolInformation[]>(
-            'vscode.executeWorkspaceSymbolProvider',
-            name
-        );
-        // The built-in JS/TS workspace symbol provider names function-like
-        // symbols with a trailing "(...)" (e.g. "handleSignupRoute()"), so a
-        // bare-name exact match against `s.name` never matches -- strip it
-        // before comparing.
-        const match = symbols?.find((s) => s.name.split('(')[0] === name && isNavigableKind(s.kind));
-        if (!match) {
-            output.appendLine(`navigate: no symbol found for "${name}"`);
-            vscode.window.setStatusBarMessage(`LucidHover: couldn't find "${name}"`, 3000);
-            return;
-        }
-
-        const document = await vscode.workspace.openTextDocument(match.location.uri);
-        const editor = await vscode.window.showTextDocument(document, { preview: false });
-        editor.selection = new vscode.Selection(match.location.range.start, match.location.range.start);
-        editor.revealRange(match.location.range, vscode.TextEditorRevealType.InCenter);
-    });
+    return vscode.commands.registerCommand(NAVIGATE_COMMAND_ID, (name: string) =>
+        navigateToFunction(name, getWorkspaceRoot, getSidecar, refreshPanel, output)
+    );
 }
 
 /** Command handler for the hover's "Show more →" link: reveals the panel, then pushes the hovered row explicitly (independent of cursor position). */

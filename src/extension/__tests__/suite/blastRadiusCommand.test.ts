@@ -125,8 +125,11 @@ suite('panel/blastRadiusCommand (Session 45, real sidecar, no Ollama needed -- g
         const dbPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'lucidhover-blast-radius-cache-')), 'cache.sqlite');
         cache = new ExplanationCache(dbPath);
         panel = new ExplanationPanelProvider(
+            vscode.Uri.file(tempDir),
             () => tempDir,
             () => cache,
+            () => undefined,
+            () => undefined,
             output
         );
     });

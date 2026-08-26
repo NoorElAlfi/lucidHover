@@ -142,6 +142,25 @@ suite('showMostImportantFunctionsCommand (Session 56)', () => {
         assert.strictEqual(editor!.selection.active.line, a!.range.start.line, "expected the cursor at a()'s line");
     });
 
+    test('does nothing when the quick pick is cancelled (returns undefined)', async function () {
+        this.timeout(20_000);
+
+        const requestStub = sandbox.stub(sidecar, 'request');
+        requestStub.withArgs('list_ranked_functions').resolves({
+            functions: [{ rel_fname: 'file.js', name: 'a', line: 0, importance: 1 }],
+        });
+        sandbox.stub(vscode.window, 'showQuickPick').resolves(undefined);
+        const showTextDocumentSpy = sandbox.spy(vscode.window, 'showTextDocument');
+
+        await showMostImportantFunctions(() => tempDir, () => cache, () => sidecar, output);
+
+        assert.strictEqual(
+            showTextDocumentSpy.called,
+            false,
+            'expected no navigation to happen when the quick pick is cancelled'
+        );
+    });
+
     test('is a no-op (status message, no throw) when indexing is not ready', async function () {
         this.timeout(20_000);
         await showMostImportantFunctions(() => undefined, () => undefined, () => undefined, output);

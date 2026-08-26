@@ -143,6 +143,27 @@ suite('searchExplanationsCommand (Session 56)', () => {
         assert.strictEqual(editor!.selection.active.line, b!.range.start.line);
     });
 
+    test('does nothing when the quick pick is cancelled (returns undefined)', async function () {
+        this.timeout(20_000);
+
+        const document = await vscode.workspace.openTextDocument(path.join(tempDir, 'file.js'));
+        const functions = await resolveAllFunctions(document, tempDir);
+        const a = functions.find((f) => f.name === 'a');
+        assert.ok(a, 'expected to resolve a()');
+        cache.write(rowFor(a!));
+
+        sandbox.stub(vscode.window, 'showQuickPick').resolves(undefined);
+        const showTextDocumentSpy = sandbox.spy(vscode.window, 'showTextDocument');
+
+        await searchExplanations(() => tempDir, () => cache, output);
+
+        assert.strictEqual(
+            showTextDocumentSpy.called,
+            false,
+            'expected no navigation to happen when the quick pick is cancelled'
+        );
+    });
+
     test('is a no-op (status message, no throw) when indexing is not ready', async function () {
         this.timeout(20_000);
         await searchExplanations(() => undefined, () => undefined, output);
