@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events';
 import * as sinon from 'sinon';
+import * as vscode from 'vscode';
 
 /**
  * Minimal stand-in for `cp.ChildProcess`, covering only what
@@ -105,6 +106,8 @@ export interface FakeWebviewView {
     webview: {
         options: unknown;
         html: string;
+        cspSource: string;
+        asWebviewUri: sinon.SinonStub;
         postMessage: sinon.SinonStub;
         onDidReceiveMessage: sinon.SinonStub;
     };
@@ -120,6 +123,14 @@ export function createFakeWebviewView(): FakeWebviewView {
         webview: {
             options: undefined,
             html: '',
+            // Session 58: renderHtml() now calls webview.asWebviewUri to
+            // resolve codicon.css's on-disk path -- real vscode.Webview
+            // rewrites it to a vscode-webview:// URI; this fake just
+            // stringifies the input path, which is enough for renderHtml to
+            // run without a real webview iframe (none of these tests assert
+            // on the codicon URI itself).
+            cspSource: 'vscode-webview://fake',
+            asWebviewUri: sinon.stub().callsFake((uri: vscode.Uri) => uri),
             postMessage: sinon.stub().resolves(true),
             onDidReceiveMessage: sinon.stub().callsFake((listener: (message: unknown) => void) => {
                 receiveListener = listener;

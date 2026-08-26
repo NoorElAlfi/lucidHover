@@ -122,8 +122,11 @@ suite('graph views on TypeScript shapes (Session 49, real sidecar, no Ollama nee
         const dbPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'lucidhover-graphview-ts-cache-')), 'cache.sqlite');
         cache = new ExplanationCache(dbPath);
         panel = new ExplanationPanelProvider(
+            vscode.Uri.file(tempDir),
             () => tempDir,
             () => cache,
+            () => undefined,
+            () => undefined,
             output
         );
     });

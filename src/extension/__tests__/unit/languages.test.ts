@@ -102,5 +102,32 @@ describe('languages.ts (repo-root languages.json reader)', () => {
                     'add/remove the matching "resourceLangId == <vscodeLanguageId>" clause.'
             );
         });
+
+        // Marketplace-readiness gate: added alongside the editor/context
+        // entry above so the command doesn't show in the global Command
+        // Palette for unsupported languages -- same drift risk, same fix.
+        it('the lucidhover.prioritizeFileIndexing commandPalette when-clause names exactly languages.json\'s vscodeLanguageIds', () => {
+            const packageJson = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8')) as {
+                contributes: { menus: { commandPalette: Array<{ command: string; when: string }> } };
+            };
+            const entry = packageJson.contributes.menus.commandPalette.find(
+                (e) => e.command === 'lucidhover.prioritizeFileIndexing'
+            );
+            assert.ok(entry, 'expected a lucidhover.prioritizeFileIndexing commandPalette menu entry');
+
+            const manifestLanguages = loadLanguageManifest(path.join(REPO_ROOT, 'languages.json'));
+            const expected = [...manifestLanguages.values()].map((e) => e.vscodeLanguageId).sort();
+            const actual = entry!.when
+                .split('||')
+                .map((clause) => clause.trim().replace(/^resourceLangId == /, ''))
+                .sort();
+
+            assert.deepStrictEqual(
+                actual,
+                expected,
+                'lucidhover.prioritizeFileIndexing\'s commandPalette when-clause has drifted from languages.json -- ' +
+                    'add/remove the matching "resourceLangId == <vscodeLanguageId>" clause.'
+            );
+        });
     });
 });

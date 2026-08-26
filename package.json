@@ -1,14 +1,28 @@
 {
   "name": "lucidhover",
+  "publisher": "lucidhover",
   "displayName": "LucidHover",
-  "description": "Codebase-aware function explainer (v0 skeleton)",
-  "version": "0.0.1",
+  "description": "Codebase-aware function explainer: hover any function to see what it does, its callers/callees, and its blast radius -- generated locally, no cloud API keys.",
+  "version": "0.1.0",
+  "author": "NoorElAlfi",
+  "license": "Apache-2.0",
+  "icon": "media/icon.png",
   "private": true,
   "engines": {
     "vscode": "^1.90.0"
   },
   "categories": [
     "Other"
+  ],
+  "keywords": [
+    "explain",
+    "codebase",
+    "hover",
+    "local",
+    "ollama",
+    "llm",
+    "call graph",
+    "code comprehension"
   ],
   "capabilities": {
     "untrustedWorkspaces": {
@@ -99,6 +113,12 @@
           "when": "resourceLangId == javascript || resourceLangId == typescript || resourceLangId == typescriptreact",
           "group": "lucidhover"
         }
+      ],
+      "commandPalette": [
+        {
+          "command": "lucidhover.prioritizeFileIndexing",
+          "when": "resourceLangId == javascript || resourceLangId == typescript || resourceLangId == typescriptreact"
+        }
       ]
     },
     "configuration": {
@@ -137,6 +157,7 @@
     "package:dryrun": "vsce package -o dist/lucidhover.vsix"
   },
   "dependencies": {
+    "@vscode/codicons": "^0.0.46-24",
     "better-sqlite3": "^13.0.3"
   },
   "devDependencies": {

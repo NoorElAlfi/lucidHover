@@ -104,8 +104,11 @@ suite('panel/callTraceCommand (Session 46, real sidecar, no Ollama needed -- gra
         const dbPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'lucidhover-call-trace-cache-')), 'cache.sqlite');
         cache = new ExplanationCache(dbPath);
         panel = new ExplanationPanelProvider(
+            vscode.Uri.file(tempDir),
             () => tempDir,
             () => cache,
+            () => undefined,
+            () => undefined,
             output
         );
     });
