@@ -119,7 +119,8 @@ suite('showMostImportantFunctionsCommand (Session 56)', () => {
             return capturedItems.find((i) => i.label === 'a');
         });
 
-        await showMostImportantFunctions(() => tempDir, () => cache, () => sidecar, output);
+        const refreshPanel = sinon.stub();
+        await showMostImportantFunctions(() => tempDir, () => cache, () => sidecar, refreshPanel, output);
 
         assert.deepStrictEqual(
             capturedItems.map((i) => i.label),
@@ -140,6 +141,14 @@ suite('showMostImportantFunctionsCommand (Session 56)', () => {
         assert.ok(editor, 'expected an editor to be opened for the picked function');
         assert.strictEqual(path.basename(editor!.document.uri.fsPath), 'file.js');
         assert.strictEqual(editor!.selection.active.line, a!.range.start.line, "expected the cursor at a()'s line");
+
+        // Session 58 code-reviewer finding, fixed here: setting
+        // editor.selection directly doesn't reliably trigger the docked
+        // panel's cursor-sync refresh (onDidChangeTextEditorSelection is a
+        // no-op when the target selection already matches), so this command
+        // must call refreshPanel explicitly after navigating -- same fix
+        // already applied to navigateToFunction/navigateToLocation.
+        assert.strictEqual(refreshPanel.calledOnce, true, 'expected refreshPanel to be called exactly once after navigating to the pick');
     });
 
     test('does nothing when the quick pick is cancelled (returns undefined)', async function () {
@@ -151,19 +160,21 @@ suite('showMostImportantFunctionsCommand (Session 56)', () => {
         });
         sandbox.stub(vscode.window, 'showQuickPick').resolves(undefined);
         const showTextDocumentSpy = sandbox.spy(vscode.window, 'showTextDocument');
+        const refreshPanel = sinon.stub();
 
-        await showMostImportantFunctions(() => tempDir, () => cache, () => sidecar, output);
+        await showMostImportantFunctions(() => tempDir, () => cache, () => sidecar, refreshPanel, output);
 
         assert.strictEqual(
             showTextDocumentSpy.called,
             false,
             'expected no navigation to happen when the quick pick is cancelled'
         );
+        assert.strictEqual(refreshPanel.called, false, 'expected refreshPanel not to be called when the quick pick is cancelled');
     });
 
     test('is a no-op (status message, no throw) when indexing is not ready', async function () {
         this.timeout(20_000);
-        await showMostImportantFunctions(() => undefined, () => undefined, () => undefined, output);
+        await showMostImportantFunctions(() => undefined, () => undefined, () => undefined, sinon.stub(), output);
     });
 
     test('shows a status message and never opens the quick pick when the repo has no indexed functions', async function () {
@@ -172,7 +183,7 @@ suite('showMostImportantFunctionsCommand (Session 56)', () => {
         requestStub.withArgs('list_ranked_functions').resolves({ functions: [] });
         const quickPickStub = sandbox.stub(vscode.window, 'showQuickPick');
 
-        await showMostImportantFunctions(() => tempDir, () => cache, () => sidecar, output);
+        await showMostImportantFunctions(() => tempDir, () => cache, () => sidecar, sinon.stub(), output);
 
         assert.strictEqual(quickPickStub.called, false, 'expected no quick pick for an empty ranking');
     });
