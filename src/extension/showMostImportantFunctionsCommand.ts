@@ -64,11 +64,20 @@ function closestResolved(candidates: readonly ResolvedFunction[], name: string, 
  * -- that command exists to disambiguate an arbitrary name string with no
  * known location (e.g. a caller/callee name from an explanation), which
  * isn't the situation here.
+ *
+ * `refreshPanel` (found by session 58's code-reviewer pass, fixed here): the
+ * same explicit-refresh-after-setting-selection fix session 58 applied to
+ * `navigateToFunction`/`navigateToLocation` in explanationPanelProvider.ts --
+ * `onDidChangeTextEditorSelection` doesn't fire when the selection this
+ * function sets already matches what the editor had, so the docked panel's
+ * cursor-sync refresh can't be relied on alone after picking a function whose
+ * location the cursor was already at (or had recently visited).
  */
 export async function showMostImportantFunctions(
     getWorkspaceRoot: () => string | undefined,
     getCache: () => ExplanationCache | undefined,
     getSidecar: () => SidecarManager | undefined,
+    refreshPanel: () => void,
     output: vscode.OutputChannel
 ): Promise<void> {
     const workspaceRoot = getWorkspaceRoot();
@@ -156,15 +165,17 @@ export async function showMostImportantFunctions(
     const position = new vscode.Position(picked.line, 0);
     editor.selection = new vscode.Selection(position, position);
     editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenter);
+    refreshPanel();
 }
 
 export function registerShowMostImportantFunctionsCommand(
     getWorkspaceRoot: () => string | undefined,
     getCache: () => ExplanationCache | undefined,
     getSidecar: () => SidecarManager | undefined,
+    refreshPanel: () => void,
     output: vscode.OutputChannel
 ): vscode.Disposable {
     return vscode.commands.registerCommand(SHOW_MOST_IMPORTANT_FUNCTIONS_COMMAND_ID, () =>
-        showMostImportantFunctions(getWorkspaceRoot, getCache, getSidecar, output)
+        showMostImportantFunctions(getWorkspaceRoot, getCache, getSidecar, refreshPanel, output)
     );
 }
