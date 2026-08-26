@@ -622,19 +622,10 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
     .risk-note {
         color: var(--vscode-editorWarning-foreground, var(--vscode-foreground));
     }
-    .back-link {
-        margin: 0 0 12px 0;
-    }
-    .graph-node {
-        margin: 0 0 10px 0;
-    }
     .graph-node-location {
         color: var(--vscode-descriptionForeground);
         font-size: 0.9em;
         margin-left: 4px;
-    }
-    .graph-node-desc {
-        margin: 2px 0 0 0;
     }
     .branch-toggle {
         margin: 0 0 10px 18px;
@@ -646,7 +637,7 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
     .branch-toggle summary:hover {
         text-decoration: underline;
     }
-    .branch-toggle .graph-node {
+    .branch-toggle .lh-graph-row {
         margin: 8px 0 0 0;
     }
     .timestamp {
@@ -663,12 +654,14 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
         border-top: 1px solid var(--vscode-widget-border, transparent);
     }
 
-    /* ── Session 58 card redesign (single-explanation view only) ─────────
-       Ported from lucidhover-ui-improvements.md / lucidhover-card-redesign.html.
-       renderGraph/renderTrace/renderBranchPoint above are untouched -- this
-       redesign's scope is the single-explanation view (renderExplanation)
-       only, per the doc's own title. Deliberately no .lh-card max-width cap
-       here (the reference file's 460px is sized for a hover-tooltip-shaped
+    /* ── Session 58 card redesign ──────────────────────────────────────
+       Ported from lucidhover-ui-improvements.md / lucidhover-card-redesign.html
+       for the single-explanation view (renderExplanation), per the doc's
+       own title. Session 59 extended the same .lh-card/.lh-section system
+       to renderGraph (blast radius) -- see the .lh-graph-* rules below.
+       renderTrace/renderBranchPoint (execution trace) remain untouched,
+       a separate follow-up. Deliberately no .lh-card max-width cap here
+       (the reference file's 460px is sized for a hover-tooltip-shaped
        card; this is the always-visible docked panel, which should use
        whatever width the user's sidebar actually gives it). */
     .lh-card {
@@ -803,6 +796,65 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
         outline-offset: -1px;
     }
     .lh-refs .codicon { color: var(--vscode-symbolIcon-methodForeground, inherit); flex-shrink: 0; }
+    /* ── Session 59: graph-view (blast radius) node rows ──────────────
+       Visually matches .lh-refs/.lh-ref-row (used-by/calls rows above),
+       but defined standalone rather than sharing those ancestor-scoped
+       selectors: renderGraphNode() is also reused by execution trace's
+       renderBranchPoint() (out of this session's scope), whose <details>
+       container isn't a .lh-refs ancestor -- coupling the button's own
+       look to that class would leave branch-alternate rows unstyled. */
+    .lh-graph-list { display: flex; flex-direction: column; gap: 6px; }
+    .lh-graph-row { min-width: 0; }
+    .lh-graph-btn {
+        appearance: none;
+        border: none;
+        width: 100%;
+        text-align: left;
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        padding: 3px 6px;
+        margin: 0 -6px;
+        border-radius: 4px;
+        color: var(--vscode-foreground);
+        background: transparent;
+        font: inherit;
+        cursor: pointer;
+    }
+    .lh-graph-btn:hover { background: var(--vscode-list-hoverBackground); }
+    .lh-graph-btn:focus-visible {
+        outline: 1px solid var(--vscode-focusBorder);
+        outline-offset: -1px;
+    }
+    .lh-graph-btn .codicon { color: var(--vscode-symbolIcon-methodForeground, inherit); flex-shrink: 0; }
+    .lh-graph-name {
+        flex: 1 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .lh-graph-loc {
+        margin-left: auto;
+        padding-left: 8px;
+        color: var(--vscode-descriptionForeground);
+        font-size: 0.85em;
+        flex-shrink: 0;
+    }
+    /* Same selector wins over the base .empty-state rule's margin-top
+       (single-class vs. single-class, later in the sheet), so the
+       "Not yet indexed." variant needs no separate override. */
+    .lh-graph-desc {
+        margin: 2px 0 0 27px;
+        color: var(--vscode-foreground);
+    }
+    /* Omission ("+N more not shown") notes nested inside a Level-N
+       .lh-section -- tighter top margin than the base .empty-state rule
+       (12px, sized for standalone top-level notes like "no callers
+       found"), since here it always follows a .lh-graph-list directly. */
+    .lh-section .empty-state {
+        margin-top: 6px;
+    }
     .lh-nav-list { margin-top: 6px; display: flex; flex-direction: column; gap: 1px; }
     .lh-nav {
         appearance: none;
@@ -900,12 +952,6 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
         while (content.firstChild) {
             content.removeChild(content.firstChild);
         }
-    }
-
-    function addSection(titleText) {
-        const h = document.createElement('h4');
-        h.textContent = titleText;
-        content.appendChild(h);
     }
 
     function addParagraph(text, className) {
@@ -1281,10 +1327,18 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
         content.appendChild(card);
     }
 
+    // Session 59: restyled to match .lh-back's "breadcrumb above the card"
+    // treatment (renderExplanation's "Back to caller" link) -- same visual
+    // role (a way back to whatever view preceded this one), so reusing the
+    // class instead of keeping a near-identical sibling. Shared by both
+    // renderGraph (blast radius) and renderTrace (execution trace, out of
+    // this session's scope) -- restyling this one small shared helper isn't
+    // part of either of those two functions' own bodies.
     function addBackLink() {
         const btn = document.createElement('button');
-        btn.className = 'name-link back-link';
-        btn.textContent = '← Back';
+        btn.className = 'lh-back';
+        btn.appendChild(codicon('chevron-left'));
+        btn.appendChild(document.createTextNode('Back'));
         btn.addEventListener('click', () => {
             vscode.postMessage({ type: 'back' });
         });
@@ -1295,31 +1349,39 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
     // + direction (payload.edges isn't used by this particular render mode
     // yet, but the data is here so a future mode, e.g. session 46's linear
     // execution-trace view, doesn't need a second RPC/enrichment round trip
-    // to get it).
+    // to get it). Session 59: restyled to the card system's row look
+    // (see the CSS block's own comment on why this uses standalone
+    // .lh-graph-* classes rather than .lh-refs/.lh-ref-row directly) --
+    // shared by renderGraph (blast radius, in scope) and renderBranchPoint
+    // (execution trace, out of scope); the shared restyle also uplifts
+    // trace/branch node rows for free, which is expected, not accidental.
     function renderGraphNode(node, container) {
         container = container || content;
         const wrap = document.createElement('div');
-        wrap.className = 'graph-node';
+        wrap.className = 'lh-graph-row';
 
         const btn = document.createElement('button');
-        btn.className = 'name-link';
-        btn.textContent = node.name;
+        btn.className = 'lh-graph-btn';
+        btn.appendChild(codicon('symbol-method'));
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'lh-graph-name';
+        nameSpan.textContent = node.name;
+        btn.appendChild(nameSpan);
+        const locSpan = document.createElement('span');
+        locSpan.className = 'lh-graph-loc';
+        locSpan.textContent = node.relFname + ':' + (node.line + 1);
+        btn.appendChild(locSpan);
         btn.addEventListener('click', () => {
             vscode.postMessage({ type: 'navigate', name: node.name });
         });
         wrap.appendChild(btn);
 
-        const loc = document.createElement('span');
-        loc.className = 'graph-node-location';
-        loc.textContent = node.relFname + ':' + (node.line + 1);
-        wrap.appendChild(loc);
-
         const desc = document.createElement('p');
         if (node.roleTag || node.oneLiner) {
-            desc.className = 'graph-node-desc';
+            desc.className = 'lh-graph-desc';
             desc.textContent = [node.roleTag, node.oneLiner].filter(Boolean).join(' — ');
         } else {
-            desc.className = 'graph-node-desc empty-state';
+            desc.className = 'lh-graph-desc empty-state';
             desc.textContent = 'Not yet indexed.';
         }
         wrap.appendChild(desc);
@@ -1358,6 +1420,12 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
         content.appendChild(details);
     }
 
+    // Session 59: restyled to the card system -- each depth becomes an
+    // .lh-section (matching Used By/Calls' own section treatment) inside a
+    // single .lh-card, with a count badge on the "Level N" title (same
+    // sectionTitle() helper renderExplanation uses) and node rows via the
+    // restyled renderGraphNode. Out of scope: renderTrace/renderBranchPoint
+    // (execution trace) below, untouched.
     function renderGraph(payload) {
         clear();
         addBackLink();
@@ -1372,24 +1440,40 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
             return;
         }
 
+        const card = document.createElement('div');
+        card.className = 'lh-card';
+
         const maxDepth = payload.nodes.reduce((max, n) => Math.max(max, n.depth), 0);
         for (let depth = 1; depth <= maxDepth; depth++) {
             const atDepth = payload.nodes.filter((n) => n.depth === depth);
             if (atDepth.length === 0) {
                 continue;
             }
-            addSection('Level ' + depth);
+            const section = document.createElement('section');
+            section.className = 'lh-section';
+            section.appendChild(sectionTitle('Level ' + depth, atDepth.length));
+
+            const list = document.createElement('div');
+            list.className = 'lh-graph-list';
             for (const node of atDepth) {
-                renderGraphNode(node);
+                renderGraphNode(node, list);
             }
+            section.appendChild(list);
+
             // Session 47: the per-level fan-out cap omits nodes rather than
             // silently truncating -- surface that as a plain note under the
             // level it applies to, not a new UI affordance.
             const omission = payload.omissions.find((o) => o.depth === depth);
             if (omission) {
-                addParagraph('+' + omission.omittedCount + ' more not shown', 'empty-state');
+                const note = document.createElement('p');
+                note.className = 'empty-state';
+                note.textContent = '+' + omission.omittedCount + ' more not shown';
+                section.appendChild(note);
             }
+
+            card.appendChild(section);
         }
+        content.appendChild(card);
     }
 
     // Session 46: a linear-chain timeline renderer, reusing renderGraphNode
