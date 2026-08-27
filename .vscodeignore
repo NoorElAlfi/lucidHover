@@ -51,15 +51,20 @@ dist/**
 node_modules/better-sqlite3/deps/**
 node_modules/better-sqlite3/src/**
 
-# @vscode/codicons ships far more than the panel webview needs at runtime
-# (dist/codicon.css + dist/codicon.ttf, ~188 KB) -- codicon.html/codicon.svg/
-# codicon.csv/codiconsLibrary.ts/metadata.json are dev-only reference
-# material, ~4.7 MB.
-node_modules/@vscode/codicons/dist/codicon.html
-node_modules/@vscode/codicons/dist/codicon.svg
-node_modules/@vscode/codicons/dist/codicon.csv
-node_modules/@vscode/codicons/dist/codiconsLibrary.ts
-node_modules/@vscode/codicons/dist/metadata.json
+# @vscode/codicons ships far more than the panel webview needs at runtime.
+# explanationPanelProvider.ts only ever loads dist/codicon.css (whose own
+# @font-face pulls dist/codicon.ttf from the same directory) -- confirmed
+# by grepping every reference to the package under src/extension/panel/.
+# Everything else in the package -- dist/'s other reference files
+# (codicon.html/svg/csv/codiconsLibrary.ts/metadata.json, ~4.7 MB),
+# src/icons/ (500+ individual source SVGs), _iconCloud/, .github/,
+# .devcontainer/, .husky/, build/, scripts/, root docs, preview.png -- is
+# dev-only and unreachable at runtime. Session 58's original exclusion
+# list only trimmed dist/'s siblings and missed the rest of the package
+# (session 63 finding: 692 files / 1.43 MB still shipping).
+node_modules/@vscode/codicons/**
+!node_modules/@vscode/codicons/dist/codicon.css
+!node_modules/@vscode/codicons/dist/codicon.ttf
 
 # Build/cache artifacts that can end up on disk locally
 **/__pycache__/**

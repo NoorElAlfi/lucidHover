@@ -28,9 +28,10 @@ back to a one-off synchronous generation on hover, so nothing hovering ever show
 
 - **Hover explanations** — role, one-liner summary, and a freshness indicator (fresh / dirty /
   stale) right in the hover tooltip.
-- **Explanation panel** — a docked view with the full explanation (why it exists, side effects,
-  risk notes, known callers/callees), a regenerate button, copy-to-clipboard, and a relative
-  "generated N ago" timestamp.
+- **Explanation panel** — a docked, card-based view with the full explanation (why it exists, side
+  effects, risk notes, known callers/callees), a regenerate button, copy-to-clipboard, a relative
+  "generated N ago" timestamp, and a "Back to caller" link when you navigate into a used-by/calls
+  row.
 - **Blast radius** — see everything that transitively depends on a function before you change it.
 - **Execution trace** — follow a function's primary call chain forward, with inline branches for
   alternate paths.
