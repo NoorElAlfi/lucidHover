@@ -18,7 +18,8 @@ First public-readiness snapshot. Highlights:
 - Blast radius and execution trace graph views, sharing the same card-based visual design as the
   explanation panel, with inline branch expansion on execution traces.
 - "Show Most Important Functions" and "Search Explanations" quick pick commands.
-- "Prioritize Indexing for This File" and pausable/resumable background indexing.
+- "Prioritize Indexing for This File" and pausable/resumable background indexing, with a live
+  progress count, per-function breakdown, and time-remaining estimate in the status bar.
 - Full layered change-detection model: dirty-tracking, debounced save, periodic flush, git hooks,
   manual refresh.
 - Local embeddings + retrieval (Ollama + LanceDB) folded into generation context.

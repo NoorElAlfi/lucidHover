@@ -217,6 +217,133 @@ suite('backgroundIndex pause/resume (Session 52)', () => {
         );
     });
 
+    test('status-bar text shows an advancing N/total progress count while a pass runs (Session 64)', async function () {
+        this.timeout(20_000);
+
+        sandbox.stub(sidecar, 'waitForInteractiveIdle').resolves();
+        const requestStub = sandbox.stub(sidecar, 'request');
+        requestStub.withArgs('list_ranked_functions').resolves({
+            functions: [
+                { rel_fname: 'a.js', name: 'a', line: 0, importance: 2 },
+                { rel_fname: 'b.js', name: 'b', line: 0, importance: 1 },
+            ],
+        });
+
+        const barTextsDuringGeneration: string[] = [];
+        requestStub.withArgs('generate_explanation').callsFake(async (_method: string, rawParams: unknown) => {
+            const params = rawParams as { name: string };
+            const statusBarItem = (manager as unknown as { statusBarItem: vscode.StatusBarItem }).statusBarItem;
+            // Captured mid-call, before this function's own generation
+            // resolves -- proves the count reflects functions completed
+            // *so far*, not the one currently in flight.
+            barTextsDuringGeneration.push(statusBarItem.text);
+            return {
+                context_hash: 'ctx',
+                context_tier: 'call_graph_only',
+                explanation: { role_tag: 'utility', one_liner: `explained ${params.name}` },
+            };
+        });
+
+        manager.start();
+        await waitForPhase('idle');
+
+        assert.deepStrictEqual(barTextsDuringGeneration, [
+            '$(sync~spin) LucidHover: indexing 0/2',
+            '$(sync~spin) LucidHover: indexing 1/2',
+        ]);
+    });
+
+    test('the progress count survives into the paused state, frozen at the point of pause (Session 64)', async function () {
+        this.timeout(20_000);
+
+        sandbox.stub(sidecar, 'waitForInteractiveIdle').resolves();
+        let pausedOnce = false;
+        const requestStub = sandbox.stub(sidecar, 'request');
+        requestStub.withArgs('list_ranked_functions').resolves({
+            functions: [
+                { rel_fname: 'a.js', name: 'a', line: 0, importance: 2 },
+                { rel_fname: 'b.js', name: 'b', line: 0, importance: 1 },
+            ],
+        });
+        requestStub.withArgs('generate_explanation').callsFake(async (_method: string, rawParams: unknown) => {
+            const params = rawParams as { name: string };
+            if (params.name === 'a' && !pausedOnce) {
+                pausedOnce = true;
+                manager.pause();
+            }
+            return {
+                context_hash: 'ctx',
+                context_tier: 'call_graph_only',
+                explanation: { role_tag: 'utility', one_liner: `explained ${params.name}` },
+            };
+        });
+
+        manager.start();
+        await waitForPhase('paused');
+
+        const statusBarItem = (manager as unknown as { statusBarItem: vscode.StatusBarItem }).statusBarItem;
+        assert.strictEqual(statusBarItem.text, '$(debug-pause) LucidHover: indexing paused 1/2');
+        assert.ok(
+            (statusBarItem.tooltip as string).includes('1 generated, 0 already cached, 0 unresolved (50% of 2)'),
+            `expected the paused tooltip to carry the frozen breakdown, got: ${statusBarItem.tooltip}`
+        );
+    });
+
+    test('the tooltip shows an ETA only after at least one generation has completed (Session 64)', async function () {
+        this.timeout(20_000);
+
+        sandbox.stub(sidecar, 'waitForInteractiveIdle').resolves();
+        const requestStub = sandbox.stub(sidecar, 'request');
+        requestStub.withArgs('list_ranked_functions').resolves({
+            functions: [
+                { rel_fname: 'a.js', name: 'a', line: 0, importance: 2 },
+                { rel_fname: 'b.js', name: 'b', line: 0, importance: 1 },
+            ],
+        });
+
+        const tooltipsDuringA: string[] = [];
+        let pausedOnB = false;
+        requestStub.withArgs('generate_explanation').callsFake(async (_method: string, rawParams: unknown) => {
+            const params = rawParams as { name: string };
+            const statusBarItem = (manager as unknown as { statusBarItem: vscode.StatusBarItem }).statusBarItem;
+            if (params.name === 'a') {
+                // No generation has completed yet at this point -- the ETA
+                // line must not appear.
+                tooltipsDuringA.push(statusBarItem.tooltip as string);
+            } else if (params.name === 'b' && !pausedOnB) {
+                pausedOnB = true;
+                // a() has completed by now, feeding the rolling average one
+                // sample. Pausing here doesn't stop b() itself from
+                // generating (cancellation is only checked at the loop's
+                // next checkpoint, and b() is the last ranked entry, so the
+                // pass ends here regardless) -- it just gets the manager
+                // into 'paused' so the assertion below can read a frozen
+                // tooltip computed from that one completed sample.
+                manager.pause();
+            }
+            return {
+                context_hash: 'ctx',
+                context_tier: 'call_graph_only',
+                explanation: { role_tag: 'utility', one_liner: `explained ${params.name}` },
+            };
+        });
+
+        manager.start();
+        await waitForPhase('paused');
+
+        assert.strictEqual(tooltipsDuringA.length, 1);
+        assert.ok(
+            !tooltipsDuringA[0].includes('remaining'),
+            `expected no ETA before any generation had completed, got: ${tooltipsDuringA[0]}`
+        );
+
+        const statusBarItem = (manager as unknown as { statusBarItem: vscode.StatusBarItem }).statusBarItem;
+        assert.ok(
+            (statusBarItem.tooltip as string).includes('remaining'),
+            `expected an ETA once a() had completed, got: ${statusBarItem.tooltip}`
+        );
+    });
+
     test('dispose() mid-pass does not crash the suspended run() when it later resumes and reaches finish() (code-review finding)', async function () {
         this.timeout(20_000);
 
