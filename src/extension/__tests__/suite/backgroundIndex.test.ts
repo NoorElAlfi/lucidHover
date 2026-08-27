@@ -25,6 +25,11 @@ import { BackgroundIndexManager } from '../../backgroundIndex';
 import { EMBEDDING_MODEL_ID, PROMPT_VERSION, resolveModelId } from '../../cache/config';
 import { ExplanationCache } from '../../cache/explanationCache';
 import { resolveAllFunctions } from '../../functionResolution';
+// Namespace import alongside the named one above -- needed to `sandbox.spy`
+// the module's exported `resolveAllFunctions` (Session 67's same-file dedup
+// test below), same pattern explanationPanelProvider.test.ts already uses to
+// stub `resolveEnclosingFunction`.
+import * as functionResolution from '../../functionResolution';
 import { SidecarManager } from '../../sidecar/sidecarManager';
 
 suite('backgroundIndex pause/resume (Session 52)', () => {
@@ -94,7 +99,14 @@ suite('backgroundIndex pause/resume (Session 52)', () => {
         // whose `request`/`waitForInteractiveIdle` methods get stubbed
         // directly below.
         sidecar = new SidecarManager(tempDir, findExtensionRoot(), '', 'all-minilm', 'http://localhost:11434', output);
-        manager = new BackgroundIndexManager(() => tempDir, () => cache, () => sidecar, output);
+        // Session 67: `concurrency: 1` -- this suite's existing tests assert
+        // exact single-item ordering (pause lands right after the first
+        // item, progress advances 0/2 -> 1/2 in lockstep with a() finishing
+        // before b() starts), which only holds with a single worker. The
+        // real worker-pool default (`BACKGROUND_INDEX_CONCURRENCY`) is
+        // exercised by the dedicated "concurrent worker pool" tests below,
+        // which construct their own manager instance with a higher value.
+        manager = new BackgroundIndexManager(() => tempDir, () => cache, () => sidecar, output, 1);
     });
 
     teardown(() => {
@@ -515,35 +527,54 @@ suite('backgroundIndex pause/resume (Session 52)', () => {
             };
         });
 
-        // Reads the manager's private progress/duration state via a short
-        // poll right after the pass's first successful generation lands,
-        // rather than trying to intercept mid-call.
+        // Reads the manager's private progress/completion-timestamp state
+        // via a short poll right after the pass's first successful
+        // generation lands, rather than trying to intercept mid-call.
         let capturedEtaMs: number | undefined;
-        let capturedDurations: number[] | undefined;
+        let capturedTimestamps: number[] | undefined;
         manager.start();
         const internals = manager as unknown as {
             progress: { total: number; generated: number; failed: number; etaMs: number | undefined } | undefined;
-            generationDurations: number[];
+            generationCompletionTimestamps: number[];
         };
         const deadline = Date.now() + 15_000;
         while (Date.now() < deadline) {
-            if (internals.progress && internals.progress.generated >= 1 && internals.generationDurations.length >= 1) {
+            // `generationCompletionTimestamps` is seeded with the pass's own
+            // start time immediately (Session 67), so its length is always
+            // >= 1 from the very start -- `>= 2` is the real "at least one
+            // completion recorded" condition here (seed + 1 completion).
+            if (internals.progress && internals.progress.generated >= 1 && internals.generationCompletionTimestamps.length >= 2) {
                 capturedEtaMs = internals.progress.etaMs;
-                capturedDurations = internals.generationDurations.slice();
+                capturedTimestamps = internals.generationCompletionTimestamps.slice();
                 break;
             }
             await new Promise((resolve) => setTimeout(resolve, 20));
         }
         await waitForPhase('idle');
 
-        assert.ok(capturedDurations && capturedDurations.length === 1, 'expected exactly one recorded duration sample at capture time');
+        assert.ok(
+            capturedTimestamps && capturedTimestamps.length === 2,
+            'expected exactly one recorded completion timestamp (plus the pass-start seed) at capture time -- the failed attempt for a() must not have recorded one'
+        );
         assert.ok(capturedEtaMs !== undefined, 'expected an ETA to have been computed');
         // remaining = total(3) - doneCount(generated=1, failed=1) = 1, so
-        // etaMs must equal exactly 1x the sole recorded sample -- if a
-        // failed attempt were still treated as "remaining" (the pre-fix
-        // bug), doneCount would only be 1 and remaining would be 2,
-        // doubling this value.
-        assert.strictEqual(capturedEtaMs, capturedDurations![0]);
+        // etaMs must equal exactly 1x the elapsed time between the
+        // pass-start seed and the one recorded completion -- if a failed
+        // attempt were still treated as "remaining" (the pre-fix bug),
+        // doneCount would only be 1 and remaining would be 2, doubling this
+        // value; if a failed attempt had also fed the completion-rate
+        // window (this session's analogous risk), the window would include
+        // an extra, wrong sample.
+        const expectedEtaMs = capturedTimestamps![1] - capturedTimestamps![0];
+        // Not `assert.strictEqual` -- `recordGenerationCompletion()` computes
+        // this as `remaining / (completions / elapsedMs)`, and that
+        // divide-then-divide-back can differ from `elapsedMs` itself by a
+        // sub-millisecond floating-point rounding error even though they're
+        // mathematically identical here (completions=1, remaining=1).
+        assert.ok(
+            Math.abs(capturedEtaMs! - expectedEtaMs) < 0.01,
+            `expected etaMs (${capturedEtaMs}) to match the elapsed time between the seed and the one completion (${expectedEtaMs}) to within floating-point rounding`
+        );
     });
 
     /**
@@ -658,5 +689,251 @@ suite('backgroundIndex pause/resume (Session 52)', () => {
             await setConfig('backgroundIndexScope', undefined);
             await setConfig('backgroundIndexTopN', undefined);
         }
+    });
+
+    /**
+     * Session 67: raises `run()`'s generation loop from strictly-one-at-a-time
+     * to a small concurrent worker pool (closing the strategy review's #2
+     * backlog item). These tests construct their own `BackgroundIndexManager`
+     * with an explicit `concurrency` (the injectable 5th constructor param,
+     * same precedent as `sidecarManager.ts`'s `spawnFn`/`connectFn`) rather
+     * than reusing the shared `manager`/`sidecar` from `setup()` above, which
+     * is pinned to `concurrency: 1` for this suite's other, order-sensitive
+     * tests. Two extra fixture files (c.js/d.js) are created and
+     * symbol-resolved up front, alongside the shared a.js/b.js, so all four
+     * functions' `resolveFileSymbols` calls hit already-open documents at
+     * pool-run time -- minimizing real language-server timing variance
+     * between workers so the concurrency assertions below aren't flaky.
+     */
+    suite('concurrent worker pool (Session 67)', () => {
+        let poolManager: BackgroundIndexManager | undefined;
+
+        setup(async function () {
+            this.timeout(20_000);
+            fs.writeFileSync(path.join(tempDir, 'c.js'), 'function c() {\n  return 3;\n}\n', 'utf8');
+            fs.writeFileSync(path.join(tempDir, 'd.js'), 'function d() {\n  return 4;\n}\n', 'utf8');
+            const cDocument = await vscode.workspace.openTextDocument(path.join(tempDir, 'c.js'));
+            await waitForSymbols(cDocument);
+            const dDocument = await vscode.workspace.openTextDocument(path.join(tempDir, 'd.js'));
+            await waitForSymbols(dDocument);
+        });
+
+        teardown(() => {
+            poolManager?.dispose();
+            poolManager = undefined;
+            fs.rmSync(path.join(tempDir, 'c.js'), { force: true });
+            fs.rmSync(path.join(tempDir, 'd.js'), { force: true });
+            // Only the same-file-dedup test creates this one; removing an
+            // absent file with `force: true` is a no-op for every other test
+            // in this nested suite.
+            fs.rmSync(path.join(tempDir, 'shared.js'), { force: true });
+        });
+
+        const fourFunctionsRanked = [
+            { rel_fname: 'a.js', name: 'a', line: 0, importance: 4 },
+            { rel_fname: 'b.js', name: 'b', line: 0, importance: 3 },
+            { rel_fname: 'c.js', name: 'c', line: 0, importance: 2 },
+            { rel_fname: 'd.js', name: 'd', line: 0, importance: 1 },
+        ];
+
+        test('runs more than one generate_explanation call concurrently, not strictly one at a time', async function () {
+            this.timeout(20_000);
+
+            sandbox.stub(sidecar, 'waitForInteractiveIdle').resolves();
+            const requestStub = sandbox.stub(sidecar, 'request');
+            requestStub.withArgs('list_ranked_functions').resolves({ functions: fourFunctionsRanked });
+
+            let inFlight = 0;
+            let maxInFlight = 0;
+            requestStub.withArgs('generate_explanation').callsFake(async (_method: string, rawParams: unknown) => {
+                const params = rawParams as { name: string };
+                inFlight++;
+                maxInFlight = Math.max(maxInFlight, inFlight);
+                // Held open long enough that, if the pool is genuinely
+                // concurrent, the other workers' own calls land inside this
+                // same window -- a strictly-serial loop (concurrency 1)
+                // would never observe inFlight > 1 no matter how long this
+                // holds.
+                await new Promise((resolve) => setTimeout(resolve, 150));
+                inFlight--;
+                return {
+                    context_hash: 'ctx',
+                    context_tier: 'call_graph_only',
+                    explanation: { role_tag: 'utility', one_liner: `explained ${params.name}` },
+                };
+            });
+
+            poolManager = new BackgroundIndexManager(() => tempDir, () => cache, () => sidecar, output, 3);
+            poolManager.start();
+
+            const deadline = Date.now() + 15_000;
+            while (poolManager.getPhase() !== 'idle' && Date.now() < deadline) {
+                await new Promise((resolve) => setTimeout(resolve, 50));
+            }
+            assert.strictEqual(poolManager.getPhase(), 'idle', 'expected the pass to finish within the test timeout');
+
+            assert.strictEqual(
+                requestStub.getCalls().filter((c) => c.args[0] === 'generate_explanation').length,
+                4,
+                'expected all 4 ranked functions to be generated'
+            );
+            assert.ok(
+                maxInFlight >= 2,
+                `expected at least 2 generate_explanation calls in flight at once with a concurrency-3 pool, observed max ${maxInFlight}`
+            );
+        });
+
+        test('two workers claiming functions from the same file share one resolveAllFunctions call, not two (code-review finding)', async function () {
+            this.timeout(20_000);
+
+            // Two functions in one file, given the pool's top two importance
+            // slots so a concurrency-2 pool's two workers claim them
+            // together at pass start -- the scenario `getFileSymbols`'s
+            // `Promise`-valued cache (rather than a resolved-value cache) is
+            // for, but which no other pool test actually exercises (every
+            // other test here uses 4 distinct single-function files).
+            fs.writeFileSync(
+                path.join(tempDir, 'shared.js'),
+                'function shared1() {\n  return 1;\n}\n\nfunction shared2() {\n  return 2;\n}\n',
+                'utf8'
+            );
+            const sharedDocument = await vscode.workspace.openTextDocument(path.join(tempDir, 'shared.js'));
+            await waitForSymbols(sharedDocument);
+
+            sandbox.stub(sidecar, 'waitForInteractiveIdle').resolves();
+            const requestStub = sandbox.stub(sidecar, 'request');
+            requestStub.withArgs('list_ranked_functions').resolves({
+                functions: [
+                    { rel_fname: 'shared.js', name: 'shared1', line: 0, importance: 2 },
+                    { rel_fname: 'shared.js', name: 'shared2', line: 4, importance: 1 },
+                ],
+            });
+            requestStub.withArgs('generate_explanation').callsFake(async (_method: string, rawParams: unknown) => {
+                const params = rawParams as { name: string };
+                // Held open so both workers are genuinely resolving/
+                // generating around the same time -- if `getFileSymbols`
+                // were duplicating the resolution instead of sharing the
+                // in-flight promise, a second `resolveAllFunctions` call for
+                // shared.js would show up inside this window.
+                await new Promise((resolve) => setTimeout(resolve, 100));
+                return {
+                    context_hash: 'ctx',
+                    context_tier: 'call_graph_only',
+                    explanation: { role_tag: 'utility', one_liner: `explained ${params.name}` },
+                };
+            });
+
+            const resolveAllFunctionsSpy = sandbox.spy(functionResolution, 'resolveAllFunctions');
+
+            poolManager = new BackgroundIndexManager(() => tempDir, () => cache, () => sidecar, output, 2);
+            poolManager.start();
+
+            const deadline = Date.now() + 15_000;
+            while (poolManager.getPhase() !== 'idle' && Date.now() < deadline) {
+                await new Promise((resolve) => setTimeout(resolve, 50));
+            }
+            assert.strictEqual(poolManager.getPhase(), 'idle', 'expected the pass to finish within the test timeout');
+
+            const sharedJsCalls = resolveAllFunctionsSpy
+                .getCalls()
+                .filter((call) => (call.args[0] as vscode.TextDocument).uri.fsPath === sharedDocument.uri.fsPath);
+            assert.strictEqual(
+                sharedJsCalls.length,
+                1,
+                `expected exactly one resolveAllFunctions call for shared.js even though two ranked functions share it, got ${sharedJsCalls.length}`
+            );
+            assert.strictEqual(
+                requestStub.getCalls().filter((c) => c.args[0] === 'generate_explanation').length,
+                2,
+                'expected both functions in the shared file to still be generated despite sharing one resolution'
+            );
+        });
+
+        test('pause() with a concurrent pool lets already-in-flight generations finish but claims no further work', async function () {
+            this.timeout(20_000);
+
+            sandbox.stub(sidecar, 'waitForInteractiveIdle').resolves();
+            const requestStub = sandbox.stub(sidecar, 'request');
+            requestStub.withArgs('list_ranked_functions').resolves({ functions: fourFunctionsRanked });
+
+            // Waits for *both* of the pool's 2 workers to have already
+            // reached their own generate_explanation call (past the
+            // post-`waitForInteractiveIdle` cancellation checkpoint) before
+            // pausing -- pausing as soon as the *first* one arrives would
+            // race the second worker's own still-in-flight symbol
+            // resolution: if that worker hadn't reached its own
+            // cancellation checkpoint yet, it would see the
+            // already-cancelled token there and return without ever calling
+            // generate_explanation, leaving only 1 call instead of the 2
+            // this test asserts. Gating on `startedCount === 2` instead
+            // removes that race entirely.
+            let startedCount = 0;
+            requestStub.withArgs('generate_explanation').callsFake(async (_method: string, rawParams: unknown) => {
+                const params = rawParams as { name: string };
+                startedCount++;
+                if (startedCount === 2) {
+                    poolManager!.pause();
+                }
+                // A short hold so pause() (fired above once both calls have
+                // started) lands well before either resolves and a 3rd item
+                // could be claimed.
+                await new Promise((resolve) => setTimeout(resolve, 100));
+                return {
+                    context_hash: 'ctx',
+                    context_tier: 'call_graph_only',
+                    explanation: { role_tag: 'utility', one_liner: `explained ${params.name}` },
+                };
+            });
+
+            poolManager = new BackgroundIndexManager(() => tempDir, () => cache, () => sidecar, output, 2);
+            poolManager.start();
+
+            const deadline = Date.now() + 15_000;
+            while (poolManager.getPhase() !== 'paused' && Date.now() < deadline) {
+                await new Promise((resolve) => setTimeout(resolve, 20));
+            }
+            assert.strictEqual(poolManager.getPhase(), 'paused', 'expected the pass to reach paused within the test timeout');
+
+            const generateCalls = requestStub.getCalls().filter((c) => c.args[0] === 'generate_explanation');
+            assert.strictEqual(
+                generateCalls.length,
+                2,
+                'expected exactly 2 generate_explanation calls (the concurrency-2 pool\'s two initial claims), never a 3rd claimed after pause() fired'
+            );
+            const generatedNames = generateCalls.map((c) => (c.args[1] as { name: string }).name).sort();
+            assert.deepStrictEqual(
+                generatedNames,
+                ['a', 'b'],
+                'expected the two highest-importance entries (a, b) to be the ones already in flight, not c/d'
+            );
+        });
+
+        test('the ETA appears after the first completion even with a concurrent pool running (Session 64 behavior preserved)', async function () {
+            this.timeout(20_000);
+
+            sandbox.stub(sidecar, 'waitForInteractiveIdle').resolves();
+            const requestStub = sandbox.stub(sidecar, 'request');
+            requestStub.withArgs('list_ranked_functions').resolves({ functions: fourFunctionsRanked });
+            requestStub.withArgs('generate_explanation').resolves({
+                context_hash: 'ctx',
+                context_tier: 'call_graph_only',
+                explanation: { role_tag: 'utility', one_liner: 'explained' },
+            });
+
+            poolManager = new BackgroundIndexManager(() => tempDir, () => cache, () => sidecar, output, 3);
+            const internals = poolManager as unknown as { progress: { etaMs: number | undefined } | undefined };
+
+            poolManager.start();
+            const deadline = Date.now() + 15_000;
+            while ((!internals.progress || internals.progress.etaMs === undefined) && Date.now() < deadline) {
+                await new Promise((resolve) => setTimeout(resolve, 20));
+            }
+
+            assert.ok(internals.progress, 'expected progress to have been initialized');
+            assert.ok(
+                internals.progress!.etaMs !== undefined && internals.progress!.etaMs >= 0,
+                'expected a defined, non-negative ETA once at least one generation had completed, even under concurrency'
+            );
+        });
     });
 });
