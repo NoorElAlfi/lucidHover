@@ -67,3 +67,27 @@ export function computeCacheKey(params: {
 export function computeFileSummaryFnHash(fnHashes: readonly string[]): string {
     return sha256([...fnHashes].sort().join(','));
 }
+
+/**
+ * Surrogate fn_hash for a root function's synthetic `__cluster_summary__`
+ * cache row (Session 68's call-graph-clustered rollup summary). Same shape
+ * as `computeFileSummaryFnHash` above (a hash of a sorted set of strings),
+ * but deliberately fed each cached member's own row `cache_key`, not just
+ * its `fn_hash` -- a code-reviewer finding on this session's first draft:
+ * hashing only `fn_hash` misses the case where a member regenerates with
+ * new `role_tag`/`one_liner` text (e.g. after a `PROMPT_VERSION` bump) while
+ * its *source* is unchanged, so `fn_hash` alone wouldn't change even though
+ * the text actually fed into the cluster's synthesis prompt did. `cache_key`
+ * (Core Design Decision #2's full fn_source+context_hash+model_id+
+ * embedding_model_id+prompt_version tuple for that row) changes whenever
+ * any of a member's real generation inputs change, closing that gap without
+ * separately tracking `prompt_version`/`model_id` here too. Kept as its own
+ * function rather than reusing `computeFileSummaryFnHash` directly -- same
+ * "near-duplicate over shared abstraction for two call sites" precedent
+ * this codebase already follows (e.g. session 46's `callTraceCommand.ts` vs
+ * `blastRadiusCommand.ts`) -- so each function's doc comment stays accurate
+ * to its own feature.
+ */
+export function computeClusterSummaryFnHash(cacheKeys: readonly string[]): string {
+    return sha256([...cacheKeys].sort().join(','));
+}

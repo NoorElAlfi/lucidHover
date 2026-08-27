@@ -96,6 +96,14 @@
         "title": "LucidHover: Trace Execution Path from Function Under Cursor"
       },
       {
+        "command": "lucidhover.showClusterSummary",
+        "title": "LucidHover: Show Cluster Summary for Function Under Cursor"
+      },
+      {
+        "command": "lucidhover.synthesizeClusterSummary",
+        "title": "LucidHover: Synthesize Cluster Summary for Function Under Cursor"
+      },
+      {
         "command": "lucidhover.prioritizeFileIndexing",
         "title": "LucidHover: Prioritize Indexing for This File"
       },

@@ -192,3 +192,17 @@ export function resolveBackgroundIndexTopN(): number {
  * every cached file-summary paragraph to regenerate too, and vice versa.
  */
 export const SUMMARY_DOC_PROMPT_VERSION = 'summary-doc-v1';
+
+/**
+ * Session 68 (call-graph-clustered rollup summary): prompt version for the
+ * new per-cluster purpose-paragraph synthesis call
+ * (sidecar/generation/prompt.py's `build_cluster_summary_prompt` /
+ * `CLUSTER_SUMMARY_SYSTEM_INSTRUCTION`) -- its own constant, deliberately
+ * separate from both `PROMPT_VERSION` (the per-function explanation prompt)
+ * and `SUMMARY_DOC_PROMPT_VERSION` (the per-file purpose-paragraph prompt),
+ * same "a wholly different prompt gets its own version" reasoning
+ * `SUMMARY_DOC_PROMPT_VERSION`'s own doc comment already gives -- a bump to
+ * either of the other two shouldn't force every cached cluster-summary row
+ * to regenerate, and vice versa.
+ */
+export const CLUSTER_SUMMARY_PROMPT_VERSION = 'cluster-summary-v1';

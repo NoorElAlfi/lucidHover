@@ -17,6 +17,14 @@ export const SHOW_BLAST_RADIUS_COMMAND_ID = 'lucidhover.showBlastRadius';
 // Session 46: same reasoning as SHOW_BLAST_RADIUS_COMMAND_ID above -- owned
 // here so callTraceCommand.ts can import it without a circular import.
 export const SHOW_CALL_TRACE_COMMAND_ID = 'lucidhover.traceExecutionPath';
+// Session 68: same reasoning again -- owned here so clusterSummaryCommand.ts
+// can import it without a circular import.
+export const SHOW_CLUSTER_SUMMARY_COMMAND_ID = 'lucidhover.showClusterSummary';
+// Session 68 (code-reviewer finding): the separate, explicit "Synthesize
+// summary" action -- see clusterSummaryCommand.ts's own doc comments on
+// showClusterSummary/synthesizeClusterSummary for why generation had to be
+// split out of the panel's own render/lookup command entirely.
+export const SYNTHESIZE_CLUSTER_SUMMARY_COMMAND_ID = 'lucidhover.synthesizeClusterSummary';
 // Session 55: same reasoning again -- owned here (moved from
 // refreshExplanationCommand.ts, which already imports this file for
 // `ExplanationPanelProvider`) so the panel's new "Regenerate" button can
@@ -106,18 +114,41 @@ export interface GraphViewBranchPoint {
  * plumbing rather than building a second renderer from scratch. `direction`
  * records which way the walk went ('upstream' = blast radius, "who calls
  * this, transitively"; 'downstream' = execution trace, "what does this
- * call, transitively") -- the webview's own message handler uses it to pick
- * between the depth-grouped renderer (`renderGraph`) and the linear-timeline
- * one (`renderTrace`).
+ * call, transitively"; 'cluster' = session 68's rollup summary, the same
+ * upstream blast-radius walk as 'upstream' but rendered as a flat member
+ * list plus a synthesized purpose paragraph rather than depth-grouped
+ * sections) -- the webview's own message handler uses it to pick between
+ * the depth-grouped renderer (`renderGraph`), the linear-timeline one
+ * (`renderTrace`), and the rollup one (`renderCluster`).
  */
 export interface GraphViewPayload {
     title: string;
-    direction: 'upstream' | 'downstream';
+    direction: 'upstream' | 'downstream' | 'cluster';
     rootName: string;
     nodes: GraphViewNode[];
     edges: GraphViewEdge[];
     omissions: GraphViewOmission[];
     branches: GraphViewBranchPoint[];
+    /**
+     * Session 68: the synthesized cluster purpose paragraph -- populated
+     * only for `direction: 'cluster'`. Undefined when nothing has been
+     * synthesized yet (see `clusterSummaryCommand.ts`'s own doc comment);
+     * the renderer shows either a "Synthesize summary" affordance
+     * (`canSynthesize` true) or a plain "nothing cached yet" note
+     * (`canSynthesize` false), rather than treating undefined as an error.
+     */
+    purpose?: string;
+    /**
+     * Session 68: true when the cluster has at least one cached member
+     * (root or a caller) but no synthesized paragraph cached yet -- only
+     * meaningful alongside `direction: 'cluster'` and `purpose: undefined`.
+     * See `clusterSummaryCommand.ts`'s `ClusterPurposeResult.canSynthesize`
+     * doc comment for the full Core Rule 4 reasoning: the panel's own
+     * lookup path (`showClusterSummary`) never generates, so this just
+     * signals whether the separate `synthesizeClusterSummary` command could
+     * produce something if the user explicitly asks for it.
+     */
+    canSynthesize?: boolean;
 }
 
 const NAVIGABLE_SYMBOL_KINDS = new Set<vscode.SymbolKind>([
@@ -234,6 +265,20 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
      */
     private pinned = false;
     /**
+     * Session 68: the resolved root function of whatever graph view is
+     * currently pinned, when the caller supplied one to `showGraph` --
+     * distinct from `currentFunction` (which tracks cursor-synced
+     * *explanation* views only, and is never touched by `showGraph`/pinning
+     * at all). Needed because the cluster-summary view's own in-view
+     * "Synthesize summary" button must retarget the graph's own root, not
+     * whatever `currentFunction` happens to still hold from before the
+     * graph was pinned (which can be stale or undefined -- e.g. a plain
+     * Command Palette invocation of "Show Cluster Summary" never sets
+     * `currentFunction` at all). Cleared on "<- Back", same lifecycle as
+     * `pinned` itself.
+     */
+    private pinnedGraphRoot: ResolvedFunction | undefined;
+    /**
      * Session 58 ("Back to caller"): set right before forwarding a clicked
      * used-by/calls row's navigation, from whatever function was on screen
      * at the time (`currentFunction`, same cursor-sync-only availability as
@@ -332,6 +377,10 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
                 void vscode.commands.executeCommand(SHOW_BLAST_RADIUS_COMMAND_ID, this.currentFunction);
             } else if (message?.type === 'traceExecutionPath') {
                 void vscode.commands.executeCommand(SHOW_CALL_TRACE_COMMAND_ID, this.currentFunction);
+            } else if (message?.type === 'showClusterSummary') {
+                void vscode.commands.executeCommand(SHOW_CLUSTER_SUMMARY_COMMAND_ID, this.currentFunction);
+            } else if (message?.type === 'synthesizeClusterSummary') {
+                void vscode.commands.executeCommand(SYNTHESIZE_CLUSTER_SUMMARY_COMMAND_ID, this.pinnedGraphRoot);
             } else if (message?.type === 'regenerate') {
                 void vscode.commands.executeCommand(REFRESH_COMMAND_ID, this.currentFunction);
             } else if (message?.type === 'copy' && typeof (message as { text?: unknown }).text === 'string') {
@@ -344,6 +393,7 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
                 }
             } else if (message?.type === 'back') {
                 this.pinned = false;
+                this.pinnedGraphRoot = undefined;
                 this.refreshFromActiveEditor();
             }
         });
@@ -404,12 +454,13 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
      * position -- used by blastRadiusCommand.ts. Cursor movement won't
      * overwrite it until the user clicks the view's own "<- Back" control.
      */
-    showGraph(payload: GraphViewPayload): void {
+    showGraph(payload: GraphViewPayload, rootTarget?: ResolvedFunction): void {
         // Same reasoning as showRow's own comment above -- invalidate any
         // outstanding refreshFor call so it can't resolve after this pin and
         // overwrite the graph view with a stale cursor-synced render.
         this.refreshSequence += 1;
         this.pinned = true;
+        this.pinnedGraphRoot = rootTarget;
         if (this.view) {
             this.postGraph(payload);
         } else {
@@ -438,6 +489,22 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
             return;
         }
         void this.view.webview.postMessage({ type: 'regenerateFailed' });
+    }
+
+    /**
+     * Session 68: same "clear a stuck busy button" role as
+     * `notifyRegenerateFailed` above, for the cluster-summary view's
+     * "Synthesize summary" button -- `synthesizeClusterSummary`'s own catch
+     * block (the `get_blast_radius` recompute can fail even though the
+     * synthesis call itself always resolves to either a real paragraph or a
+     * placeholder string, never a rejection) calls this instead of leaving
+     * the button disabled with no way to retry.
+     */
+    notifySynthesizeFailed(): void {
+        if (!this.view) {
+            return;
+        }
+        void this.view.webview.postMessage({ type: 'synthesizeFailed' });
     }
 
     /**
@@ -1025,10 +1092,14 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
     // card is never touched.
     let activeRegenerateBtn;
     let activeCopyBtn;
+    // Session 68: same role as activeRegenerateBtn above, for renderCluster's
+    // "Synthesize summary" button and a 'synthesizeFailed' message.
+    let activeSynthesizeBtn;
 
     function clear() {
         activeRegenerateBtn = undefined;
         activeCopyBtn = undefined;
+        activeSynthesizeBtn = undefined;
         while (content.firstChild) {
             content.removeChild(content.firstChild);
         }
@@ -1329,6 +1400,7 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
         navList.className = 'lh-nav-list';
         navList.appendChild(navButton('showBlastRadius', 'See full blast radius'));
         navList.appendChild(navButton('traceExecutionPath', 'Trace execution from here'));
+        navList.appendChild(navButton('showClusterSummary', 'Show cluster summary'));
         usedBySection.appendChild(navList);
         card.appendChild(usedBySection);
 
@@ -1651,6 +1723,110 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
         content.appendChild(card);
     }
 
+    // Session 68 (call-graph-clustered rollup summary): a flat member list
+    // (not depth-grouped like renderGraph, since a "rollup" reads better as
+    // one list than several near-empty "Level N" sections) plus a leading
+    // synthesized Purpose section -- mirrors renderExplanation's "Why it
+    // exists" section styling (sectionTitle + .lh-body), and reuses
+    // renderGraphNode for each member exactly as renderGraph/renderTrace do,
+    // so an uncached member gets the identical "Not yet indexed."
+    // placeholder. payload.nodes here are the root's upstream callers (the
+    // same shape get_blast_radius already returns) -- the root itself is
+    // shown separately via payload.rootName, mirroring renderTrace's own
+    // root row (non-clickable, no location badge here since cluster summary
+    // doesn't need one).
+    // NOTE: no backtick characters anywhere in this comment block or below,
+    // up to the closing template literal at the bottom of renderHtml() --
+    // this whole script is embedded inside one big TS template literal, and
+    // an unescaped backtick in a comment silently truncates it (see session
+    // 55's own artifact for the exact same bug hit before).
+    function renderCluster(payload) {
+        clear();
+        addBackLink();
+
+        const h = document.createElement('h3');
+        h.textContent = payload.title;
+        content.appendChild(h);
+
+        const card = document.createElement('div');
+        card.className = 'lh-card';
+
+        const purposeSection = document.createElement('section');
+        purposeSection.className = 'lh-section';
+        purposeSection.appendChild(sectionTitle('Purpose'));
+        if (payload.purpose) {
+            const body = document.createElement('p');
+            body.className = 'lh-body';
+            body.textContent = payload.purpose;
+            purposeSection.appendChild(body);
+        } else if (payload.canSynthesize) {
+            // Session 68 (code-reviewer finding): synthesis must never
+            // happen automatically as part of showing this view (Core Rule
+            // 4 -- the panel's own render/lookup path is a pure cache
+            // lookup, no exception) -- this button is the one, separate,
+            // explicit action that's allowed to call the LLM, the same
+            // "explicit action, not the panel's own render path" role
+            // renderExplanation's Regenerate button already has.
+            const note = document.createElement('p');
+            note.className = 'empty-state';
+            note.textContent = 'This cluster has cached explanations but no summary yet.';
+            purposeSection.appendChild(note);
+
+            const synthesizeBtn = document.createElement('button');
+            synthesizeBtn.className = 'lh-btn';
+            synthesizeBtn.style.marginTop = '8px';
+            synthesizeBtn.appendChild(codicon('sparkle'));
+            synthesizeBtn.appendChild(document.createTextNode('Synthesize summary'));
+            synthesizeBtn.addEventListener('click', () => {
+                // Busy state clears itself on a fresh 'renderGraph' message;
+                // a failure clears it via 'synthesizeFailed' instead (see
+                // that message handler below).
+                synthesizeBtn.classList.add('is-busy');
+                synthesizeBtn.disabled = true;
+                vscode.postMessage({ type: 'synthesizeClusterSummary' });
+            });
+            purposeSection.appendChild(synthesizeBtn);
+            activeSynthesizeBtn = synthesizeBtn;
+        } else {
+            const note = document.createElement('p');
+            note.className = 'empty-state';
+            note.textContent =
+                'Not enough cached explanations in this cluster yet to synthesize a summary -- hover or ' +
+                'refresh some of the functions below first.';
+            purposeSection.appendChild(note);
+        }
+        card.appendChild(purposeSection);
+
+        const membersSection = document.createElement('section');
+        membersSection.className = 'lh-section';
+        membersSection.appendChild(sectionTitle('Members', payload.nodes.length));
+        if (payload.nodes.length === 0) {
+            const note = document.createElement('p');
+            note.className = 'empty-state';
+            note.textContent = 'No upstream callers found within the search depth.';
+            membersSection.appendChild(note);
+        } else {
+            const list = document.createElement('div');
+            list.className = 'lh-graph-list';
+            for (const node of payload.nodes) {
+                renderGraphNode(node, list);
+            }
+            membersSection.appendChild(list);
+            // Session 47's per-level fan-out cap applies to the same
+            // upstream walk this reuses -- surface any omission the same
+            // plain way renderGraph does, just not grouped by depth here.
+            for (const omission of payload.omissions) {
+                const note = document.createElement('p');
+                note.className = 'empty-state';
+                note.textContent = '+' + omission.omittedCount + ' more not shown at depth ' + omission.depth;
+                membersSection.appendChild(note);
+            }
+        }
+        card.appendChild(membersSection);
+
+        content.appendChild(card);
+    }
+
     window.addEventListener('message', (event) => {
         const message = event.data;
         if (message.type === 'render') {
@@ -1679,9 +1855,21 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
             if (activeCopyBtn) {
                 activeCopyBtn.disabled = false;
             }
+        } else if (message.type === 'synthesizeFailed') {
+            // Session 68: same reasoning as 'regenerateFailed' above -- a
+            // failed synthesis (the get_blast_radius recompute, not the
+            // synthesis call itself) would otherwise leave the "Synthesize
+            // summary" button stuck disabled with no fresh render message
+            // to reset it.
+            if (activeSynthesizeBtn) {
+                activeSynthesizeBtn.classList.remove('is-busy');
+                activeSynthesizeBtn.disabled = false;
+            }
         } else if (message.type === 'renderGraph') {
             if (message.payload.direction === 'downstream') {
                 renderTrace(message.payload);
+            } else if (message.payload.direction === 'cluster') {
+                renderCluster(message.payload);
             } else {
                 renderGraph(message.payload);
             }
