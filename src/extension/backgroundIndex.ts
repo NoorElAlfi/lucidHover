@@ -38,12 +38,13 @@ const DELAY_BETWEEN_GENERATIONS_MS = 1000;
  */
 const ETA_WINDOW_SIZE = 5;
 
-/** Snapshot of a pass's progress, tracked as `run()`'s loop advances and frozen into 'pausing'/'paused' status-bar text so pausing doesn't lose the count (Session 64). */
+/** Snapshot of a pass's progress, tracked as `run()`'s loop advances and frozen into 'pausing'/'paused' status-bar text so pausing doesn't lose the count (Session 64). `failed` (Session 65) counts a `generate_explanation` call that threw -- it's "done" for percentage/ETA purposes (nothing more will happen for that function this pass) but distinct from `generated`/`skipped`/`unresolved` since it's the one outcome that means the function still has no explanation. */
 interface ProgressSnapshot {
     total: number;
     generated: number;
     skipped: number;
     unresolved: number;
+    failed: number;
     etaMs: number | undefined;
 }
 
@@ -52,6 +53,11 @@ interface RankedFunction {
     name: string;
     line: number;
     importance: number;
+}
+
+/** How many of `total` this pass has finished handling, whatever the outcome -- generated, already cached, unresolved, or failed (Session 65 added `failed` here so a pass with real failures can still reach 100% instead of undercounting forever). */
+function doneCount(p: ProgressSnapshot): number {
+    return p.generated + p.skipped + p.unresolved + p.failed;
 }
 
 /** Formats a millisecond duration for the tooltip's ETA line -- "under a minute", "~3 min", or "~1h 20m" (Session 64). */
@@ -188,10 +194,13 @@ export class BackgroundIndexManager implements vscode.Disposable {
         if (!p) {
             return '';
         }
-        const pct = p.total > 0 ? Math.round(((p.generated + p.skipped + p.unresolved) / p.total) * 100) : 0;
-        const lines = [
-            `${p.generated} generated, ${p.skipped} already cached, ${p.unresolved} unresolved (${pct}% of ${p.total})`,
-        ];
+        const pct = p.total > 0 ? Math.round((doneCount(p) / p.total) * 100) : 0;
+        let breakdown = `${p.generated} generated, ${p.skipped} already cached, ${p.unresolved} unresolved`;
+        if (p.failed > 0) {
+            breakdown += `, ${p.failed} failed`;
+        }
+        breakdown += ` (${pct}% of ${p.total})`;
+        const lines = [breakdown];
         if (p.etaMs !== undefined) {
             lines.push(`~${formatDuration(p.etaMs)} remaining`);
         }
@@ -203,7 +212,7 @@ export class BackgroundIndexManager implements vscode.Disposable {
         if (!p || p.total === 0) {
             return '';
         }
-        return ` ${p.generated + p.skipped + p.unresolved}/${p.total}`;
+        return ` ${doneCount(p)}/${p.total}`;
     }
 
     private updateStatusBar(): void {
@@ -297,7 +306,8 @@ export class BackgroundIndexManager implements vscode.Disposable {
         let generated = 0;
         let skipped = 0;
         let unresolved = 0;
-        this.progress = { total: ranked.length, generated, skipped, unresolved, etaMs: undefined };
+        let failed = 0;
+        this.progress = { total: ranked.length, generated, skipped, unresolved, failed, etaMs: undefined };
         this.updateStatusBar();
 
         for (const entry of ranked) {
@@ -369,6 +379,8 @@ export class BackgroundIndexManager implements vscode.Disposable {
                 this.recordGenerationDuration(Date.now() - startedAt);
                 this.output.appendLine(`background-index: generated ${resolved.fnId}`);
             } catch (err) {
+                failed++;
+                this.progress.failed = failed;
                 this.output.appendLine(
                     `background-index: generate_explanation failed for ${resolved.fnId}: ${String(err)}`
                 );
@@ -379,13 +391,12 @@ export class BackgroundIndexManager implements vscode.Disposable {
         }
 
         const status = token.isCancellationRequested ? (this.getPhase() === 'pausing' ? 'paused' : 'canceled') : 'done';
-        this.output.appendLine(
-            `background-index: ${status} -- ${generated} generated, ${skipped} already cached, ${unresolved} unresolved`
-        );
-        vscode.window.setStatusBarMessage(
-            `LucidHover: background indexing ${status} -- ${generated} generated, ${skipped} already cached, ${unresolved} unresolved`,
-            5000
-        );
+        let summary = `${generated} generated, ${skipped} already cached, ${unresolved} unresolved`;
+        if (failed > 0) {
+            summary += `, ${failed} failed`;
+        }
+        this.output.appendLine(`background-index: ${status} -- ${summary}`);
+        vscode.window.setStatusBarMessage(`LucidHover: background indexing ${status} -- ${summary}`, 5000);
         this.finish(source);
     }
 
@@ -404,7 +415,7 @@ export class BackgroundIndexManager implements vscode.Disposable {
             this.generationDurations.shift();
         }
         const avgMs = this.generationDurations.reduce((a, b) => a + b, 0) / this.generationDurations.length;
-        const remaining = (this.progress!.total - this.progress!.generated - this.progress!.skipped - this.progress!.unresolved);
+        const remaining = this.progress!.total - doneCount(this.progress!);
         this.progress!.etaMs = Math.max(0, remaining) * avgMs;
     }
 
