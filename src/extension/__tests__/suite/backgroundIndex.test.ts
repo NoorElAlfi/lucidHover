@@ -383,4 +383,166 @@ suite('backgroundIndex pause/resume (Session 52)', () => {
         // call right after this must also not throw on an
         // already-disposed manager.
     });
+
+    test('a failed generate_explanation call is counted as done, so the pass still reaches 100% instead of undercounting forever (Session 65)', async function () {
+        this.timeout(20_000);
+
+        sandbox.stub(sidecar, 'waitForInteractiveIdle').resolves();
+        const requestStub = sandbox.stub(sidecar, 'request');
+        requestStub.withArgs('list_ranked_functions').resolves({
+            functions: [
+                { rel_fname: 'a.js', name: 'a', line: 0, importance: 2 },
+                { rel_fname: 'b.js', name: 'b', line: 0, importance: 1 },
+            ],
+        });
+        requestStub.withArgs('generate_explanation').callsFake(async (_method: string, rawParams: unknown) => {
+            const params = rawParams as { name: string };
+            if (params.name === 'a') {
+                throw new Error('simulated generation failure');
+            }
+            return {
+                context_hash: 'ctx',
+                context_tier: 'call_graph_only',
+                explanation: { role_tag: 'utility', one_liner: `explained ${params.name}` },
+            };
+        });
+
+        manager.start();
+        await waitForPhase('idle');
+
+        // `updateStatusBar()`'s 'idle' case only hides the item -- it
+        // doesn't rewrite text/tooltip -- so what's left here is the last
+        // value written by the loop itself, after b() (the final entry)
+        // completed.
+        const statusBarItem = (manager as unknown as { statusBarItem: vscode.StatusBarItem }).statusBarItem;
+        assert.strictEqual(
+            statusBarItem.text,
+            '$(sync~spin) LucidHover: indexing 2/2',
+            'a failed attempt must still count toward the fraction reaching total, not leave it stuck below 100%'
+        );
+        assert.ok(
+            (statusBarItem.tooltip as string).includes(
+                '1 generated, 0 already cached, 0 unresolved, 1 failed (100% of 2)'
+            ),
+            `expected the breakdown to reach 100% and append the failed clause, got: ${statusBarItem.tooltip}`
+        );
+    });
+
+    test('the completion toast includes the failure count when nonzero and omits it (unchanged wording) when zero (Session 65)', async function () {
+        this.timeout(20_000);
+
+        sandbox.stub(sidecar, 'waitForInteractiveIdle').resolves();
+        const setStatusBarMessageStub = sandbox.stub(vscode.window, 'setStatusBarMessage');
+        const requestStub = sandbox.stub(sidecar, 'request');
+        requestStub.withArgs('list_ranked_functions').resolves({
+            functions: [
+                { rel_fname: 'a.js', name: 'a', line: 0, importance: 2 },
+                { rel_fname: 'b.js', name: 'b', line: 0, importance: 1 },
+            ],
+        });
+        requestStub.withArgs('generate_explanation').callsFake(async (_method: string, rawParams: unknown) => {
+            const params = rawParams as { name: string };
+            if (params.name === 'a') {
+                throw new Error('simulated generation failure');
+            }
+            return {
+                context_hash: 'ctx',
+                context_tier: 'call_graph_only',
+                explanation: { role_tag: 'utility', one_liner: `explained ${params.name}` },
+            };
+        });
+
+        manager.start();
+        await waitForPhase('idle');
+
+        const finalToast = setStatusBarMessageStub.getCalls().map((c) => c.args[0] as string).pop();
+        assert.ok(finalToast, 'expected a completion toast to have been shown');
+        assert.strictEqual(
+            finalToast,
+            'LucidHover: background indexing done -- 1 generated, 0 already cached, 0 unresolved, 1 failed',
+            `expected the toast to append the failed clause, got: ${finalToast}`
+        );
+    });
+
+    test('a clean pass with no failures shows unchanged wording, with no failed clause (Session 65 regression)', async function () {
+        this.timeout(20_000);
+
+        sandbox.stub(sidecar, 'waitForInteractiveIdle').resolves();
+        const setStatusBarMessageStub = sandbox.stub(vscode.window, 'setStatusBarMessage');
+        const requestStub = sandbox.stub(sidecar, 'request');
+        requestStub.withArgs('list_ranked_functions').resolves({
+            functions: [{ rel_fname: 'a.js', name: 'a', line: 0, importance: 1 }],
+        });
+        requestStub.withArgs('generate_explanation').resolves({
+            context_hash: 'ctx',
+            context_tier: 'call_graph_only',
+            explanation: { role_tag: 'utility', one_liner: 'explained a' },
+        });
+
+        manager.start();
+        await waitForPhase('idle');
+
+        const finalToast = setStatusBarMessageStub.getCalls().map((c) => c.args[0] as string).pop();
+        assert.strictEqual(
+            finalToast,
+            'LucidHover: background indexing done -- 1 generated, 0 already cached, 0 unresolved',
+            `expected a clean pass's wording to be unchanged from Session 64, got: ${finalToast}`
+        );
+    });
+
+    test("a failed attempt counts as done for the ETA's remaining calculation, not left outstanding forever (Session 65)", async function () {
+        this.timeout(20_000);
+
+        sandbox.stub(sidecar, 'waitForInteractiveIdle').resolves();
+        const requestStub = sandbox.stub(sidecar, 'request');
+        requestStub.withArgs('list_ranked_functions').resolves({
+            functions: [
+                { rel_fname: 'a.js', name: 'a', line: 0, importance: 3 },
+                { rel_fname: 'b.js', name: 'b', line: 0, importance: 2 },
+                { rel_fname: 'b.js', name: 'b', line: 0, importance: 1 },
+            ],
+        });
+
+        requestStub.withArgs('generate_explanation').callsFake(async (_method: string, rawParams: unknown) => {
+            const params = rawParams as { name: string };
+            if (params.name === 'a') {
+                throw new Error('simulated generation failure');
+            }
+            return {
+                context_hash: 'ctx',
+                context_tier: 'call_graph_only',
+                explanation: { role_tag: 'utility', one_liner: `explained ${params.name}` },
+            };
+        });
+
+        // Reads the manager's private progress/duration state via a short
+        // poll right after the pass's first successful generation lands,
+        // rather than trying to intercept mid-call.
+        let capturedEtaMs: number | undefined;
+        let capturedDurations: number[] | undefined;
+        manager.start();
+        const internals = manager as unknown as {
+            progress: { total: number; generated: number; failed: number; etaMs: number | undefined } | undefined;
+            generationDurations: number[];
+        };
+        const deadline = Date.now() + 15_000;
+        while (Date.now() < deadline) {
+            if (internals.progress && internals.progress.generated >= 1 && internals.generationDurations.length >= 1) {
+                capturedEtaMs = internals.progress.etaMs;
+                capturedDurations = internals.generationDurations.slice();
+                break;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        await waitForPhase('idle');
+
+        assert.ok(capturedDurations && capturedDurations.length === 1, 'expected exactly one recorded duration sample at capture time');
+        assert.ok(capturedEtaMs !== undefined, 'expected an ETA to have been computed');
+        // remaining = total(3) - doneCount(generated=1, failed=1) = 1, so
+        // etaMs must equal exactly 1x the sole recorded sample -- if a
+        // failed attempt were still treated as "remaining" (the pre-fix
+        // bug), doneCount would only be 1 and remaining would be 2,
+        // doubling this value.
+        assert.strictEqual(capturedEtaMs, capturedDurations![0]);
+    });
 });
