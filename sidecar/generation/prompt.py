@@ -473,3 +473,62 @@ def build_file_summary_prompt(file_path: str, functions: list[dict]) -> str:
     lines.append("")
     lines.append("Purpose paragraph:")
     return "\n".join(lines)
+
+
+# Session 68 (call-graph-clustered rollup summary): same "explicitly
+# secondary -- a rendering target for data already computed, not a second
+# pipeline" reasoning as build_file_summary_prompt above, but clustered by
+# call-graph proximity (a root function plus its transitive upstream
+# callers, from the extension host's existing get_blast_radius walk) rather
+# than by file. Deliberately its own prompt/system-instruction, not a reuse
+# of FILE_SUMMARY_SYSTEM_INSTRUCTION with a fake "file path" -- that
+# instruction's own wording ("one source file") would misdescribe what's
+# actually being summarized here and risk confusing the model with a
+# file_path argument that isn't a real path. Same "unconstrained
+# generate_text, no few-shot, no Reasoning stage" shape as the file-summary
+# prompt -- one direct instruction-and-answer call, per the same "purpose
+# paragraph over already-generated data" reasoning.
+CLUSTER_SUMMARY_SYSTEM_INSTRUCTION = """You are writing a short "purpose" paragraph for one cluster of related \
+functions in a codebase, as part of a generated overview for a reader who's new to the code. You are given one \
+"root" function and a set of its known upstream callers (functions that call it, directly or transitively, up to \
+a few hops through the call graph) -- each already-indexed function comes with a role_tag and one_liner that were \
+already generated and verified against the real code; treat them as ground truth, do not re-derive or contradict \
+them. Some entries may have no role_tag/one_liner yet (not yet indexed) -- describe the cluster from whichever \
+entries do have them, and don't invent details for the rest.
+
+Write 2-4 plain-prose sentences describing what this cluster of functions does together and how the root function \
+fits into it -- e.g. what larger feature or workflow it's part of, based on who calls it and why. No bullet list, \
+no markdown, no restating any one_liner verbatim. If the callers look unrelated to each other or to the root, say \
+so rather than inventing a common thread."""
+
+
+def build_cluster_summary_prompt(
+    root_name: str, root_role: str | None, root_one_liner: str | None, callers: list[dict]
+) -> str:
+    """
+    `callers` is a list of `{"name", "role_tag", "one_liner", "depth"}`
+    dicts -- already filtered by the extension host to only those with a
+    real cached role_tag/one_liner (Core Rule 4/9: this module never sees
+    which functions are or aren't cached, so the caller list handed in here
+    is already the "ground truth" subset). `root_role`/`root_one_liner` are
+    `None` when the root function itself hasn't been cached yet -- the
+    cluster can still be summarized from its cached callers alone.
+    """
+    lines = [f"Root function: {root_name}"]
+    if root_role or root_one_liner:
+        role = root_role or "unknown role"
+        one_liner = root_one_liner or "no summary available"
+        lines.append(f"  ({role}): {one_liner}")
+    else:
+        lines.append("  (not yet indexed)")
+    lines.append("")
+    lines.append("Known upstream callers (direct or transitive, already ranked by codebase importance):")
+    if not callers:
+        lines.append("  none")
+    for c in callers:
+        role = c.get("role_tag") or "unknown role"
+        one_liner = c.get("one_liner") or "no summary available"
+        lines.append(f"  - {c['name']} (depth {c.get('depth', '?')}, {role}): {one_liner}")
+    lines.append("")
+    lines.append("Purpose paragraph:")
+    return "\n".join(lines)

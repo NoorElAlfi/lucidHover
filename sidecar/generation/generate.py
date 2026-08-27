@@ -12,8 +12,10 @@ from ..repomap.context import FunctionContext
 from ..retrieval.retrieve import RetrievedChunk
 from .ollama_client import OLLAMA_BASE_URL, generate_structured, generate_text
 from .prompt import (
+    CLUSTER_SUMMARY_SYSTEM_INSTRUCTION,
     FILE_SUMMARY_SYSTEM_INSTRUCTION,
     SYSTEM_INSTRUCTION,
+    build_cluster_summary_prompt,
     build_context_bundle,
     build_file_summary_prompt,
     build_json_prompt,
@@ -82,4 +84,28 @@ def generate_file_summary(
     """
     prompt = build_file_summary_prompt(file_path, functions)
     summary = generate_text(model, FILE_SUMMARY_SYSTEM_INSTRUCTION, prompt, base_url=base_url)
+    return summary.strip()
+
+
+def generate_cluster_summary(
+    model: str,
+    root_name: str,
+    root_role: str | None,
+    root_one_liner: str | None,
+    callers: list[dict[str, Any]],
+    base_url: str = OLLAMA_BASE_URL,
+) -> str:
+    """
+    Session 68 (call-graph-clustered rollup summary): the one new LLM call
+    the feature needs -- a purpose paragraph for a root function's cluster
+    (itself plus its already-cached transitive upstream callers, selected by
+    the extension host via the sidecar's existing `get_blast_radius` RPC).
+    Same shape as `generate_file_summary` above: one unconstrained
+    `generate_text` call, no Stage B. This module never touches
+    `ExplanationCache` (TS-owned) or `RepoMap`/the call graph directly --
+    both the cluster selection and the cache reads already happened before
+    this is called.
+    """
+    prompt = build_cluster_summary_prompt(root_name, root_role, root_one_liner, callers)
+    summary = generate_text(model, CLUSTER_SUMMARY_SYSTEM_INSTRUCTION, prompt, base_url=base_url)
     return summary.strip()

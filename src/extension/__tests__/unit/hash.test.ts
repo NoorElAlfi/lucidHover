@@ -1,5 +1,11 @@
 import * as assert from 'assert';
-import { computeCacheKey, computeFileSummaryFnHash, computeFnHash, computeFnId } from '../../cache/hash';
+import {
+    computeCacheKey,
+    computeClusterSummaryFnHash,
+    computeFileSummaryFnHash,
+    computeFnHash,
+    computeFnId,
+} from '../../cache/hash';
 
 describe('cache/hash', () => {
     describe('computeFnId', () => {
@@ -79,6 +85,27 @@ describe('cache/hash', () => {
             const input = ['h3', 'h1', 'h2'];
             const copy = [...input];
             computeFileSummaryFnHash(input);
+            assert.deepStrictEqual(input, copy);
+        });
+    });
+
+    describe('computeClusterSummaryFnHash', () => {
+        it('is deterministic and order-independent (sorted before hashing)', () => {
+            const a = computeClusterSummaryFnHash(['h1', 'h2', 'h3']);
+            const b = computeClusterSummaryFnHash(['h3', 'h1', 'h2']);
+            assert.strictEqual(a, b);
+        });
+
+        it('changes when the set of hashes changes', () => {
+            const a = computeClusterSummaryFnHash(['h1', 'h2']);
+            const b = computeClusterSummaryFnHash(['h1', 'h2', 'h3']);
+            assert.notStrictEqual(a, b);
+        });
+
+        it('does not mutate the input array', () => {
+            const input = ['h3', 'h1', 'h2'];
+            const copy = [...input];
+            computeClusterSummaryFnHash(input);
             assert.deepStrictEqual(input, copy);
         });
     });

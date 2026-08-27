@@ -12,6 +12,7 @@ import { ExplanationHoverProvider } from './hover/functionHoverProvider';
 import { documentSelectorForSupportedLanguages } from './languages';
 import { registerShowBlastRadiusCommand } from './panel/blastRadiusCommand';
 import { registerShowCallTraceCommand } from './panel/callTraceCommand';
+import { registerShowClusterSummaryCommand, registerSynthesizeClusterSummaryCommand } from './panel/clusterSummaryCommand';
 import {
     EXPLANATION_PANEL_VIEW_ID,
     ExplanationPanelProvider,
@@ -226,6 +227,24 @@ export function activate(context: vscode.ExtensionContext): void {
     );
     context.subscriptions.push(
         registerShowCallTraceCommand(
+            () => indexedWorkspaceRoot,
+            () => explanationCache ?? undefined,
+            () => sidecarManager ?? undefined,
+            panelProvider,
+            output
+        )
+    );
+    context.subscriptions.push(
+        registerShowClusterSummaryCommand(
+            () => indexedWorkspaceRoot,
+            () => explanationCache ?? undefined,
+            () => sidecarManager ?? undefined,
+            panelProvider,
+            output
+        )
+    );
+    context.subscriptions.push(
+        registerSynthesizeClusterSummaryCommand(
             () => indexedWorkspaceRoot,
             () => explanationCache ?? undefined,
             () => sidecarManager ?? undefined,

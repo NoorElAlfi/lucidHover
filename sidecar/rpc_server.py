@@ -93,6 +93,15 @@ Methods:
     summary-doc generator needs -- everything else in that feature is a
     template pass over data the cache already has. Same `ollama_base_url`
     resolution as "generate_explanation" above.
+  - "generate_cluster_summary" (Session 68, call-graph-clustered rollup
+    summary): given a root function's name and its already-cached
+    role_tag/one_liner (or none, if not yet cached), plus its already-cached
+    transitive upstream callers (the extension host selects these via
+    "get_blast_radius" above, then reads their role_tag/one_liner from its
+    own `ExplanationCache`, not read here), returns one short prose purpose
+    paragraph for the cluster. Same shape as "generate_file_summary" -- one
+    new LLM call over data already computed, no new ranking/graph logic.
+    Same `ollama_base_url` resolution as "generate_explanation" above.
 
 The extension host is the only client and connects/reconnects at most once
 per process lifetime (a crashed sidecar is a whole new process, not a
@@ -154,7 +163,7 @@ from dataclasses import asdict
 from typing import Any
 
 from .cache.hashing import CONTEXT_TIER_CALL_GRAPH_AND_RETRIEVAL, CONTEXT_TIER_CALL_GRAPH_ONLY, compute_context_hash
-from .generation.generate import generate_explanation, generate_file_summary
+from .generation.generate import generate_cluster_summary, generate_explanation, generate_file_summary
 from .generation.ollama_client import OLLAMA_BASE_URL, OllamaError
 from .repomap.context import BlastRadius, CallTrace, FunctionContext, RepoMap
 from .retrieval.retrieve import RetrievedChunk, query_top_k, reindex_file_chunks, reindex_repo_chunks
@@ -392,6 +401,26 @@ def _handle_generate_file_summary(repo_map: RepoMap, params: dict[str, Any]) -> 
     return {"summary": summary}
 
 
+def _handle_generate_cluster_summary(repo_map: RepoMap, params: dict[str, Any]) -> dict[str, Any]:
+    root_name = params["root_name"]
+    root_role = params.get("root_role")
+    root_one_liner = params.get("root_one_liner")
+    callers = params["callers"]
+    model_id = params["model_id"]
+
+    base_url = getattr(repo_map, "ollama_base_url", None) or OLLAMA_BASE_URL
+    try:
+        summary = generate_cluster_summary(model_id, root_name, root_role, root_one_liner, callers, base_url)
+    except OllamaError as exc:
+        # Same "never silently stub or fall back" rule as
+        # _handle_generate_explanation/_handle_generate_file_summary -- the
+        # extension host decides how to degrade a failed synthesis (see
+        # clusterSummaryCommand.ts), this just surfaces the real error.
+        raise RuntimeError(str(exc)) from exc
+
+    return {"summary": summary}
+
+
 _METHODS = {
     "status": _handle_status,
     "index_file": _handle_index_file,
@@ -402,6 +431,7 @@ _METHODS = {
     "get_blast_radius": _handle_get_blast_radius,
     "get_call_trace": _handle_get_call_trace,
     "generate_file_summary": _handle_generate_file_summary,
+    "generate_cluster_summary": _handle_generate_cluster_summary,
 }
 
 
