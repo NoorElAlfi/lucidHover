@@ -132,6 +132,18 @@
           "minimum": 5,
           "description": "How often (in seconds) LucidHover checks functions edited but not yet saved and regenerates their explanations in the background."
         },
+        "lucidHover.backgroundIndexScope": {
+          "type": "string",
+          "enum": ["topN", "fullRepo"],
+          "default": "topN",
+          "description": "Which functions the startup background-indexing pass pre-generates. \"topN\" (default) covers only the most important functions, per lucidHover.backgroundIndexTopN -- functions outside this scope still get an explanation the first time they're hovered (LucidHover always falls back to generating on a cache miss). \"fullRepo\" indexes every function in the repo up front, which can take a very long time on a large codebase."
+        },
+        "lucidHover.backgroundIndexTopN": {
+          "type": "number",
+          "default": 200,
+          "minimum": 1,
+          "description": "How many of the repo's highest-importance functions the startup background-indexing pass covers, when lucidHover.backgroundIndexScope is \"topN\". Ignored when backgroundIndexScope is \"fullRepo\"."
+        },
         "lucidHover.modelId": {
           "type": "string",
           "default": "",

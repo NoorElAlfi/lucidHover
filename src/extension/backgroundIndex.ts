@@ -1,7 +1,13 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { ExplanationCache } from './cache/explanationCache';
-import { EMBEDDING_MODEL_ID, PROMPT_VERSION, resolveModelId } from './cache/config';
+import {
+    EMBEDDING_MODEL_ID,
+    PROMPT_VERSION,
+    resolveBackgroundIndexScope,
+    resolveBackgroundIndexTopN,
+    resolveModelId,
+} from './cache/config';
 import { resolveAllFunctions, ResolvedFunction } from './functionResolution';
 import { generateAndCache } from './generation';
 import { SidecarManager } from './sidecar/sidecarManager';
@@ -281,6 +287,7 @@ export class BackgroundIndexManager implements vscode.Disposable {
         }
 
         let ranked: RankedFunction[];
+        let totalRanked: number;
         try {
             const result = await sidecar.request<{ functions: RankedFunction[] }>(
                 'list_ranked_functions',
@@ -289,13 +296,31 @@ export class BackgroundIndexManager implements vscode.Disposable {
                 'background'
             );
             ranked = result.functions;
+            totalRanked = ranked.length;
         } catch (err) {
             this.output.appendLine(`background-index: list_ranked_functions failed: ${String(err)}`);
             this.finish(source);
             return;
         }
 
-        this.output.appendLine(`background-index: starting (${ranked.length} functions ranked)`);
+        // Session 66: narrows the default pass from the whole repo (Session
+        // 9's original behavior, ~16 hours projected on a real 6,633-
+        // function repo) down to the highest-importance slice -- Core Rule 4's
+        // cache-miss hover fallback covers whatever this pass doesn't reach.
+        // `ranked` is already importance-descending
+        // (`_handle_list_ranked_functions` sorts it sidecar-side), so this is
+        // a plain slice, not a re-sort. `'fullRepo'` (opt-in) keeps the old
+        // behavior by skipping the slice entirely.
+        const scope = resolveBackgroundIndexScope();
+        if (scope === 'topN') {
+            ranked = ranked.slice(0, resolveBackgroundIndexTopN());
+        }
+
+        const startingNote =
+            ranked.length < totalRanked
+                ? `top ${ranked.length} of ${totalRanked} ranked functions`
+                : `${ranked.length} functions ranked`;
+        this.output.appendLine(`background-index: starting (${startingNote})`);
         vscode.window.setStatusBarMessage(`LucidHover: background indexing ${ranked.length} functions...`, 5000);
 
         // Lazily resolved per file (VS Code's own document-symbol provider,
