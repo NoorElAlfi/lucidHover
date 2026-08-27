@@ -1,0 +1,39 @@
+# Session 63: Marketplace publish-prep gate
+
+**Date:** 2026-08-27
+**Build-order step(s) completed:** None (gate session, not a Build Order milestone — like sessions 8/43/57)
+**Status:** complete
+
+## Files touched
+- [.vscodeignore](../../.vscodeignore) — fixed a real packaging leak found this session: the `@vscode/codicons` exclusion block (session 58) only trimmed 5 sibling files under `dist/` and missed the rest of the installed package (`src/icons/` — 500+ individual source SVGs, `_iconCloud/`, `.github/`, `.devcontainer/`, `.husky/`, `build/`, `scripts/`, root docs, `preview.png`) — confirmed via `npx vsce ls --tree` showing 692 files / 1.43 MB shipping under `node_modules/@vscode/` before the fix. Replaced the 5 explicit exclusions with a broad `node_modules/@vscode/codicons/**` exclude plus two negation lines re-including only `dist/codicon.css` and `dist/codicon.ttf` — the only two files `explanationPanelProvider.ts` actually loads (confirmed by grep: `dist/codicon.css` via `asWebviewUri`, whose own `@font-face` pulls `codicon.ttf` from the same directory). First attempt at the negation (re-including the whole `dist/` directory, then trying to re-exclude individual files under it) was wrong — gitignore-style negation can't re-exclude inside an already-negated directory, so it silently brought back all 7 dist files; fixed by negating only the two needed files directly against the `**` exclude, with no directory-level negation in between.
+- [CHANGELOG.md](../../CHANGELOG.md) — folded sessions 58-62's changes (card-redesigned docked panel, "Back to caller" link, blast-radius/execution-trace card redesign with inline branch expansion, a docked-panel `refreshFor` request-sequencing fix, a QuickPick-navigation panel-refresh fix) into the existing single `0.1.0` entry, per user's explicit choice (not a default) since nothing has shipped to the Marketplace yet.
+- [README.md](../../README.md) — updated the "Explanation panel" feature bullet to mention the card-based layout and "Back to caller" link, matching the CHANGELOG update.
+- [package.json](../../package.json) — `categories` changed from `["Other"]` to `["Programming Languages", "Machine Learning", "Other"]`, per user's explicit choice (not a default) — "Other" alone under-served Marketplace discoverability for a code-comprehension tool built on a local LLM.
+- [dist/lucidhover.vsix](../../dist/lucidhover.vsix) — packaging output (gitignored), not a tracked change. Built, installed, smoke-tested, and uninstalled again this session; left at its final state (162 files / 10.3 MB) on disk for the user's own reference.
+
+## Decisions made
+- **Changelog: fold into 0.1.0, don't bump to 0.2.0.** Put to the user via `AskUserQuestion` (session 39/44 precedent for non-obvious calls). User chose folding — nothing has been published yet, so a `0.2.0` entry would imply an intermediate public release that never happened.
+- **`repository`/`bugs`/`homepage`: leave unset.** Put to the user via `AskUserQuestion`. User confirmed session 57's original call still holds — no git remote exists on this repo, and an invented URL would be worse than a warning-only missing field.
+- **`categories`: add both "Programming Languages" and "Machine Learning" alongside "Other".** Put to the user via `AskUserQuestion` (4 options: one, the other, both, or leave as-is). User chose both.
+- Everything else found this session (the `.vscodeignore` codicons leak) was judged mechanical/unambiguous and fixed directly without asking, consistent with session 57's own precedent for "clearly safe and mechanical" fixes — there was only one correct set of runtime-referenced files (confirmed by grep before editing), not a judgment call.
+
+## Deviations from spec
+- None. This is an audit/fix gate session — no spec-governed feature behavior changed. No production TS/Python logic was touched (confirmed via `git diff --stat` at session end: exactly `.vscodeignore`, `CHANGELOG.md`, `README.md`, `package.json`, matching this session's own explicit scope boundary).
+
+## Test status
+- **Baseline (before any edit):** `npx tsc -p . --noEmit` clean; `npm run test:unit` **62/62 passing**; `npm run test:integration` **68/68 passing**; `python -m pytest sidecar/tests -q` **145/145 passing**. All unchanged from session 57/62's last-known counts except integration (60→68, reflecting sessions 58-62's own test additions already merged into master before this session started).
+- **Packaging:** `npx vsce package -o dist/lucidhover.vsix` — first run (before the `.vscodeignore` fix) measured **852 files / 11.03 MB**, a real regression against session 57's 160 files / 10.21 MB baseline, entirely traced to the `@vscode/codicons` leak above (not a hypothetical — inspected via `npx vsce ls --tree`). After the fix: **162 files / 10.3 MB**, matching session 57's baseline within the expected delta (new session 58-62 source/test files, changelog growth). Comfortably under the 25 MB Marketplace limit.
+- **Install smoke test:** real `code --install-extension dist/lucidhover.vsix --force` into the user's actual VS Code profile (not a dev host), real `code --new-window` on `fixtures/javascript/repomap`, real Ollama running locally (`qwen2.5-coder:1.5b` bundled default + `all-minilm` embedding model both present). User drove the GUI through 5 steps this session had never verified from an actually-installed package before (session 51 only covered the pre-session-58 UI): hover, docked panel (card redesign), blast radius (`logEvent`'s real 17-caller fan-out, cap note), a caller-link navigation into "Back to caller", and both QuickPick commands' post-navigation panel refresh (the session 61/62 fixes). User confirmed all 5 steps passed ("Everything is working"). Extension uninstalled afterward, confirmed via `code --list-extensions`.
+- `code-reviewer` pass (async agent) scoped to exactly this session's 4 touched files (not a whole-repo audit) — zero violations found; independently re-verified the `.vscodeignore` negation pattern via its own `vsce package`/`vsce ls` run, grepped `explanationPanelProvider.ts` to confirm `codicon.css`/`codicon.ttf` are the only referenced codicons files, and cross-checked every CHANGELOG/README claim (Back to caller, inline branch expansion, card-based graph views, QuickPick/rapid-cursor-move panel refresh) against real source (`backTarget`/`BACK_TARGET_TTL_MS`/`backToCaller`, `renderBranchPoint`, `refreshPanel` params, `refreshSequence` counter) rather than trusting the diff's own prose. Confirmed all 3 new `categories` strings are valid Marketplace enum values.
+
+## Blockers / open questions
+- **`publisher: "lucidhover"` is still a placeholder, not a registered Marketplace identity** — carried forward unchanged from session 57. Not addressed this session (out of scope, see below).
+- Nothing else. Every section of the gate passed outright or was fixed within this session.
+
+## Handoff for next session
+- **This is the last automatable step before a real upload.** Everything left is an account/credential action explicitly out of scope for this session to perform:
+  1. Register a Marketplace publisher at https://marketplace.visualstudio.com/manage — either the id `lucidhover` (if still available) or a different one, updating `package.json`'s `publisher` field to match if different.
+  2. Generate a Personal Access Token (Azure DevOps) with Marketplace "Manage" scope.
+  3. Either run `vsce publish -p <token>` from this repo, or upload `dist/lucidhover.vsix` directly at the Marketplace web UI's "New extension" flow.
+- The packaged `.vsix` at `dist/lucidhover.vsix` (162 files / 10.3 MB, built this session) is ready to upload as-is — no further edits are needed for the first listing unless the user wants to revisit the `repository` field (deliberately deferred, not forgotten) once a GitHub remote exists.
+- No other follow-up items were identified this session.
