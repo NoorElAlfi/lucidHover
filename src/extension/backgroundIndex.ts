@@ -28,11 +28,44 @@ type BackgroundIndexPhase = 'idle' | 'running' | 'pausing' | 'paused';
 // starvation bug is why this can't just fire requests back-to-back).
 const DELAY_BETWEEN_GENERATIONS_MS = 1000;
 
+/**
+ * Session 64: how many of the most recent per-function generation durations
+ * (wall-clock time around each `generateAndCache` call, cache hits excluded --
+ * a lookup that skips generation entirely isn't a sample of generation speed)
+ * feed the rolling average behind the tooltip's ETA. Deliberately small and
+ * fixed rather than configurable -- this is a rough "still going" indicator,
+ * not a scheduling guarantee.
+ */
+const ETA_WINDOW_SIZE = 5;
+
+/** Snapshot of a pass's progress, tracked as `run()`'s loop advances and frozen into 'pausing'/'paused' status-bar text so pausing doesn't lose the count (Session 64). */
+interface ProgressSnapshot {
+    total: number;
+    generated: number;
+    skipped: number;
+    unresolved: number;
+    etaMs: number | undefined;
+}
+
 interface RankedFunction {
     rel_fname: string;
     name: string;
     line: number;
     importance: number;
+}
+
+/** Formats a millisecond duration for the tooltip's ETA line -- "under a minute", "~3 min", or "~1h 20m" (Session 64). */
+function formatDuration(ms: number): string {
+    const totalMinutes = Math.round(ms / 60_000);
+    if (totalMinutes < 1) {
+        return 'under a minute';
+    }
+    if (totalMinutes < 60) {
+        return `${totalMinutes} min`;
+    }
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
 }
 
 /**
@@ -68,6 +101,12 @@ export class BackgroundIndexManager implements vscode.Disposable {
      * found in session 27).
      */
     private disposed = false;
+
+    /** Current pass's progress, read by `updateStatusBar()`; `undefined` outside a running/pausing/paused pass (Session 64). */
+    private progress: ProgressSnapshot | undefined;
+
+    /** Rolling window of recent per-function generation durations (ms), oldest first, capped at `ETA_WINDOW_SIZE` -- feeds the tooltip's ETA estimate (Session 64). */
+    private generationDurations: number[] = [];
 
     constructor(
         private readonly getWorkspaceRoot: () => string | undefined,
@@ -138,27 +177,55 @@ export class BackgroundIndexManager implements vscode.Disposable {
         this.statusBarItem.dispose();
     }
 
+    /**
+     * Builds the tooltip's progress/breakdown/ETA block, shared by the
+     * 'running'/'pausing'/'paused' cases below so pausing (which stops
+     * calling `updateStatusBar()` from the loop) still shows the same
+     * frozen numbers `paused` renders from `this.progress` (Session 64).
+     */
+    private progressDetail(): string {
+        const p = this.progress;
+        if (!p) {
+            return '';
+        }
+        const pct = p.total > 0 ? Math.round(((p.generated + p.skipped + p.unresolved) / p.total) * 100) : 0;
+        const lines = [
+            `${p.generated} generated, ${p.skipped} already cached, ${p.unresolved} unresolved (${pct}% of ${p.total})`,
+        ];
+        if (p.etaMs !== undefined) {
+            lines.push(`~${formatDuration(p.etaMs)} remaining`);
+        }
+        return '\n' + lines.join('\n');
+    }
+
+    private progressFraction(): string {
+        const p = this.progress;
+        if (!p || p.total === 0) {
+            return '';
+        }
+        return ` ${p.generated + p.skipped + p.unresolved}/${p.total}`;
+    }
+
     private updateStatusBar(): void {
         if (this.disposed) {
             return;
         }
         switch (this.phase) {
             case 'running':
-                this.statusBarItem.text = '$(sync~spin) LucidHover: indexing…';
-                this.statusBarItem.tooltip = 'Background indexing is in progress. Click to pause.';
+                this.statusBarItem.text = `$(sync~spin) LucidHover: indexing${this.progressFraction()}`;
+                this.statusBarItem.tooltip = `Background indexing is in progress. Click to pause.${this.progressDetail()}`;
                 this.statusBarItem.backgroundColor = undefined;
                 this.statusBarItem.show();
                 break;
             case 'pausing':
-                this.statusBarItem.text = '$(sync~spin) LucidHover: pausing…';
-                this.statusBarItem.tooltip =
-                    'Background indexing is finishing its current function before pausing.';
+                this.statusBarItem.text = `$(sync~spin) LucidHover: pausing${this.progressFraction()}`;
+                this.statusBarItem.tooltip = `Background indexing is finishing its current function before pausing.${this.progressDetail()}`;
                 this.statusBarItem.backgroundColor = undefined;
                 this.statusBarItem.show();
                 break;
             case 'paused':
-                this.statusBarItem.text = '$(debug-pause) LucidHover: indexing paused';
-                this.statusBarItem.tooltip = 'Background indexing is paused. Click to resume.';
+                this.statusBarItem.text = `$(debug-pause) LucidHover: indexing paused${this.progressFraction()}`;
+                this.statusBarItem.tooltip = `Background indexing is paused. Click to resume.${this.progressDetail()}`;
                 this.statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
                 this.statusBarItem.show();
                 break;
@@ -178,6 +245,16 @@ export class BackgroundIndexManager implements vscode.Disposable {
         }
 
         this.phase = 'running';
+        // Cleared here, not just at the fresh-snapshot assignment further
+        // down (Session 64) -- a resumed pass otherwise briefly displays the
+        // *previous* pass's frozen count/ETA under the 'running' phase's "in
+        // progress" wording for as long as `waitForInteractiveIdle` and the
+        // `list_ranked_functions` round-trip below take (code-reviewer
+        // finding), directly contradicting `finish()`'s own stated intent
+        // that a resumed pass shouldn't inherit stale data from before the
+        // pause.
+        this.progress = undefined;
+        this.generationDurations = [];
         this.updateStatusBar();
         const source = new vscode.CancellationTokenSource();
         this.cancellationSource = source;
@@ -220,6 +297,8 @@ export class BackgroundIndexManager implements vscode.Disposable {
         let generated = 0;
         let skipped = 0;
         let unresolved = 0;
+        this.progress = { total: ranked.length, generated, skipped, unresolved, etaMs: undefined };
+        this.updateStatusBar();
 
         for (const entry of ranked) {
             if (token.isCancellationRequested) {
@@ -240,6 +319,8 @@ export class BackgroundIndexManager implements vscode.Disposable {
                 // hover; nothing to generate against without a resolved
                 // symbol, so skip rather than error the whole pass.
                 unresolved++;
+                this.progress.unresolved = unresolved;
+                this.updateStatusBar();
                 continue;
             }
 
@@ -252,6 +333,8 @@ export class BackgroundIndexManager implements vscode.Disposable {
             });
             if (cached) {
                 skipped++;
+                this.progress.skipped = skipped;
+                this.updateStatusBar();
                 continue;
             }
 
@@ -278,15 +361,19 @@ export class BackgroundIndexManager implements vscode.Disposable {
                 break;
             }
 
+            const startedAt = Date.now();
             try {
                 await generateAndCache(sidecar, cache, resolved, 'background');
                 generated++;
+                this.progress.generated = generated;
+                this.recordGenerationDuration(Date.now() - startedAt);
                 this.output.appendLine(`background-index: generated ${resolved.fnId}`);
             } catch (err) {
                 this.output.appendLine(
                     `background-index: generate_explanation failed for ${resolved.fnId}: ${String(err)}`
                 );
             }
+            this.updateStatusBar();
 
             await this.delay(DELAY_BETWEEN_GENERATIONS_MS, token);
         }
@@ -295,7 +382,30 @@ export class BackgroundIndexManager implements vscode.Disposable {
         this.output.appendLine(
             `background-index: ${status} -- ${generated} generated, ${skipped} already cached, ${unresolved} unresolved`
         );
+        vscode.window.setStatusBarMessage(
+            `LucidHover: background indexing ${status} -- ${generated} generated, ${skipped} already cached, ${unresolved} unresolved`,
+            5000
+        );
         this.finish(source);
+    }
+
+    /**
+     * Feeds `this.progress.etaMs` from a rolling average of the last
+     * `ETA_WINDOW_SIZE` successful generation durations (Session 64). Only
+     * successful generations are sampled -- a cache-hit skip took no
+     * generation time, and a failed call's duration isn't representative of
+     * how long a real generation takes. `this.progress` is always set before
+     * this is called (from inside `run()`'s loop, after the loop's own
+     * `this.progress = {...}` assignment).
+     */
+    private recordGenerationDuration(durationMs: number): void {
+        this.generationDurations.push(durationMs);
+        if (this.generationDurations.length > ETA_WINDOW_SIZE) {
+            this.generationDurations.shift();
+        }
+        const avgMs = this.generationDurations.reduce((a, b) => a + b, 0) / this.generationDurations.length;
+        const remaining = (this.progress!.total - this.progress!.generated - this.progress!.skipped - this.progress!.unresolved);
+        this.progress!.etaMs = Math.max(0, remaining) * avgMs;
     }
 
     /** `this.phase === 'pausing'` distinguishes a user-initiated `pause()` from a plain teardown cancel (`dispose()`) -- only the former should leave the pass resumable. */
@@ -303,6 +413,15 @@ export class BackgroundIndexManager implements vscode.Disposable {
         source.dispose();
         this.cancellationSource = undefined;
         this.phase = this.phase === 'pausing' ? 'paused' : 'idle';
+        // 'paused' still needs `this.progress` for `updateStatusBar()`'s
+        // frozen count/ETA (Session 64) -- only clear it once the pass is
+        // truly done (idle), so a resumed pass starts its own fresh
+        // snapshot instead of inheriting a stale one across an unrelated
+        // later run.
+        if (this.phase === 'idle') {
+            this.progress = undefined;
+            this.generationDurations = [];
+        }
         this.updateStatusBar();
     }
 

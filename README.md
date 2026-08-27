@@ -42,7 +42,8 @@ back to a one-off synchronous generation on hover, so nothing hovering ever show
 - **Prioritize Indexing for This File** — jump a file's functions to the front of the background
   indexing queue.
 - **Pause/Resume Background Indexing** — a status bar toggle for when you want indexing to yield
-  CPU/Ollama capacity to something else.
+  CPU/Ollama capacity to something else, showing a live progress count, per-function breakdown, and
+  an estimated time remaining in the tooltip.
 - **Summary docs** — generate per-file Markdown summaries from already-cached explanations.
 - **Automatic staleness tracking** — edits and cross-file changes flag affected explanations as
   stale so you know when what you're reading no longer matches the code.
