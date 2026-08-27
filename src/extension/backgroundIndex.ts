@@ -26,21 +26,64 @@ export const TOGGLE_BACKGROUND_INDEX_COMMAND_ID = 'lucidhover.toggleBackgroundIn
  */
 type BackgroundIndexPhase = 'idle' | 'running' | 'pausing' | 'paused';
 
-// Gap between generations, not a request timeout. The pass awaits each
-// generate_explanation fully before scheduling the next one (never more than
-// one in flight), and this delay opens a real window for a hover-miss/
-// save-reindex/refresh request to get its socket write in first -- the
-// sidecar dispatches strictly in write order (Session 6's heartbeat-
-// starvation bug is why this can't just fire requests back-to-back).
+// Gap between generations, not a request timeout. Each worker (see
+// BACKGROUND_INDEX_CONCURRENCY below) awaits its own generate_explanation
+// fully before claiming its next item, and this delay opens a window for a
+// hover-miss/save-reindex/refresh request to be issued and registered as
+// pending before that worker's next `waitForInteractiveIdle()` check --
+// Session 9's original reasoning (an unbroken run of back-to-back background
+// sends leaving no gap for interactive work to jump the queue) still holds
+// per-worker even though Session 37 made sidecar dispatch itself concurrent.
 const DELAY_BETWEEN_GENERATIONS_MS = 1000;
 
 /**
- * Session 64: how many of the most recent per-function generation durations
- * (wall-clock time around each `generateAndCache` call, cache hits excluded --
- * a lookup that skips generation entirely isn't a sample of generation speed)
- * feed the rolling average behind the tooltip's ETA. Deliberately small and
- * fixed rather than configurable -- this is a rough "still going" indicator,
- * not a scheduling guarantee.
+ * Session 67: how many `generate_explanation` calls this pass runs
+ * concurrently, closing the strategy review's #2 backlog item (raising
+ * background indexing off a strictly-one-at-a-time loop). Every worker still
+ * calls `sidecar.waitForInteractiveIdle(token)` before its own
+ * `generate_explanation` call, so interactive traffic keeps identical
+ * priority to before this session -- only background-vs-background
+ * concurrency changes (Core Rule 11 already established that this
+ * background-vs-background race is safe, just previously unmeasured for a
+ * real worker pool).
+ *
+ * Set lower than the session brief's own 3-4-worker starting point, on a
+ * fresh live measurement against real Ollama on this machine (see the
+ * session-67 artifact for the full methodology and numbers) that came out
+ * substantially less favorable than the strategy review's earlier
+ * 1.00x/1.57x/2.22x/2.78x throughput figures at N=1/2/4/8: this machine
+ * today showed real throughput gains flattening out (and getting noisy)
+ * past N=2, and -- the more decisive number -- real added interactive
+ * latency from a background pool already in flight grew roughly linearly
+ * with pool size (~+2s per additional concurrent worker), blowing well past
+ * session 36's <1s acceptance bar at any pool size, not just at the high
+ * end. `2` was chosen as the conservative reading of that data: it captured
+ * the best measured throughput (2.60x) while limiting the worker-pool-
+ * specific added-latency cost (beyond the single-collision floor sessions
+ * 36/37 already characterized as pre-existing and unavoidable) to roughly
+ * one increment rather than compounding it across 3-4 simultaneous workers.
+ * This numeric gap from the brief's own reference figures is flagged, not
+ * resolved, in the artifact -- a future session with a quieter measurement
+ * environment should re-check it rather than assume today's number is the
+ * last word.
+ */
+const BACKGROUND_INDEX_CONCURRENCY = 2;
+
+/**
+ * Session 64: how many of the most recent successful-generation completion
+ * timestamps feed the rolling throughput rate behind the tooltip's ETA.
+ * Deliberately small and fixed rather than configurable -- this is a rough
+ * "still going" indicator, not a scheduling guarantee.
+ *
+ * Session 67: with `BACKGROUND_INDEX_CONCURRENCY` workers running, per-item
+ * *duration* is no longer a valid proxy for pace -- several generations can
+ * be in flight at once, so "how long did the last one take" understates
+ * throughput by up to ~`BACKGROUND_INDEX_CONCURRENCY`x. `recordGenerationCompletion()`
+ * below now tracks wall-clock completion *timestamps* instead of per-call
+ * durations and derives a completions-per-ms rate from the window, which is
+ * agnostic to how much overlap those completions actually had -- it reads
+ * the real observed throughput rather than assuming either a linear stream
+ * or a fixed multiplier on it.
  */
 const ETA_WINDOW_SIZE = 5;
 
@@ -117,15 +160,28 @@ export class BackgroundIndexManager implements vscode.Disposable {
     /** Current pass's progress, read by `updateStatusBar()`; `undefined` outside a running/pausing/paused pass (Session 64). */
     private progress: ProgressSnapshot | undefined;
 
-    /** Rolling window of recent per-function generation durations (ms), oldest first, capped at `ETA_WINDOW_SIZE` -- feeds the tooltip's ETA estimate (Session 64). */
-    private generationDurations: number[] = [];
+    /**
+     * Rolling window of successful-generation completion timestamps
+     * (`Date.now()`, oldest first, capped at `ETA_WINDOW_SIZE + 1` entries),
+     * seeded with the pass's own start time so a rate is available after
+     * just one completion (Session 64's original "ETA only once at least one
+     * generation has completed" behavior, preserved). Session 67: replaced
+     * `generationDurations` (per-call durations, meaningless once several
+     * calls can be in flight at once) -- see `ETA_WINDOW_SIZE`'s doc comment.
+     */
+    private generationCompletionTimestamps: number[] = [];
+
+    /** Concurrent `generate_explanation` workers this pass runs (Session 67); injectable purely for tests that need single-item precision (pause-mid-item, exact call ordering) -- production always uses `BACKGROUND_INDEX_CONCURRENCY`, same injection precedent as `sidecarManager.ts`'s `spawnFn`/`connectFn`. */
+    private readonly concurrency: number;
 
     constructor(
         private readonly getWorkspaceRoot: () => string | undefined,
         private readonly getCache: () => ExplanationCache | undefined,
         private readonly getSidecar: () => SidecarManager | undefined,
-        private readonly output: vscode.OutputChannel
+        private readonly output: vscode.OutputChannel,
+        concurrency: number = BACKGROUND_INDEX_CONCURRENCY
     ) {
+        this.concurrency = concurrency;
         // Same left-aligned/priority-100/click-to-act pattern as
         // sidecarManager.ts's own statusBarItem -- hidden while idle (nothing
         // actionable), same "hidden until it needs to say something"
@@ -269,7 +325,7 @@ export class BackgroundIndexManager implements vscode.Disposable {
         // that a resumed pass shouldn't inherit stale data from before the
         // pause.
         this.progress = undefined;
-        this.generationDurations = [];
+        this.generationCompletionTimestamps = [];
         this.updateStatusBar();
         const source = new vscode.CancellationTokenSource();
         this.cancellationSource = source;
@@ -326,94 +382,120 @@ export class BackgroundIndexManager implements vscode.Disposable {
         // Lazily resolved per file (VS Code's own document-symbol provider,
         // same path resolveEnclosingFunction/resolveAllFunctions already
         // use) so a file with several ranked functions is only opened and
-        // symbol-resolved once, not once per function.
-        const fileSymbols = new Map<string, ResolvedFunction[]>();
+        // symbol-resolved once, not once per function -- a `Promise` map
+        // (Session 67), not a resolved-value map, so two workers reaching
+        // the same file around the same time share the one in-flight
+        // resolution instead of duplicating it (the `Map.get`/`.set` pair
+        // below has no `await` between them, so this is race-free despite
+        // running from several concurrent workers -- JS has no true thread
+        // parallelism, only interleaving at `await` points).
+        const fileSymbolPromises = new Map<string, Promise<ResolvedFunction[]>>();
+        const getFileSymbols = (relFname: string): Promise<ResolvedFunction[]> => {
+            let promise = fileSymbolPromises.get(relFname);
+            if (!promise) {
+                promise = this.resolveFileSymbols(workspaceRoot, relFname);
+                fileSymbolPromises.set(relFname, promise);
+            }
+            return promise;
+        };
+
         let generated = 0;
         let skipped = 0;
         let unresolved = 0;
         let failed = 0;
         this.progress = { total: ranked.length, generated, skipped, unresolved, failed, etaMs: undefined };
+        this.generationCompletionTimestamps = [Date.now()];
         this.updateStatusBar();
 
-        for (const entry of ranked) {
-            if (token.isCancellationRequested) {
-                break;
+        // Session 67: `ranked` is a shared work queue, claimed one entry at a
+        // time by up to `this.concurrency` workers below -- `nextIndex` is
+        // safe to mutate from several concurrent `worker()` calls for the
+        // same reason `fileSymbolPromises` is above (no `await` inside
+        // `claimNext` itself).
+        let nextIndex = 0;
+        const claimNext = (): RankedFunction | undefined => {
+            if (token.isCancellationRequested || nextIndex >= ranked.length) {
+                return undefined;
             }
+            return ranked[nextIndex++];
+        };
 
-            let symbols = fileSymbols.get(entry.rel_fname);
-            if (!symbols) {
-                symbols = await this.resolveFileSymbols(workspaceRoot, entry.rel_fname);
-                fileSymbols.set(entry.rel_fname, symbols);
-            }
+        const worker = async (): Promise<void> => {
+            for (;;) {
+                const entry = claimNext();
+                if (!entry) {
+                    return;
+                }
 
-            const resolved = this.matchRankedEntry(entry, symbols);
-            if (!resolved) {
-                // A def tree-sitter saw but VS Code's document-symbol
-                // provider didn't (or vice versa) -- same tolerance gap
-                // sidecar/rpc_server.py's _find_def_tag already accepts for
-                // hover; nothing to generate against without a resolved
-                // symbol, so skip rather than error the whole pass.
-                unresolved++;
-                this.progress.unresolved = unresolved;
+                const symbols = await getFileSymbols(entry.rel_fname);
+                const resolved = this.matchRankedEntry(entry, symbols);
+                if (!resolved) {
+                    // A def tree-sitter saw but VS Code's document-symbol
+                    // provider didn't (or vice versa) -- same tolerance gap
+                    // sidecar/rpc_server.py's _find_def_tag already accepts
+                    // for hover; nothing to generate against without a
+                    // resolved symbol, so skip rather than error the whole
+                    // pass.
+                    unresolved++;
+                    this.progress!.unresolved = unresolved;
+                    this.updateStatusBar();
+                    continue;
+                }
+
+                const cached = cache.lookup({
+                    fnId: resolved.fnId,
+                    fnHash: resolved.fnHash,
+                    modelId: resolveModelId(),
+                    embeddingModelId: EMBEDDING_MODEL_ID,
+                    promptVersion: PROMPT_VERSION,
+                });
+                if (cached) {
+                    skipped++;
+                    this.progress!.skipped = skipped;
+                    this.updateStatusBar();
+                    continue;
+                }
+
+                // Session 32: defer to any hover-miss/save-reindex/refresh
+                // request that's pending or arrives in the settle window --
+                // every worker awaits this immediately before its own
+                // generate_explanation call, so interactive traffic keeps
+                // identical priority regardless of how many background
+                // workers are running (Session 67). See
+                // SidecarManager.waitForInteractiveIdle's doc comment.
+                //
+                // Passing `token` lets `waitForInteractiveIdle` itself
+                // resolve early on cancellation (Session 36) -- without it,
+                // a steady stream of interactive activity could otherwise
+                // leave this worker parked for an extended, unbounded
+                // stretch, during which pausing would silently have no
+                // effect (found by code-reviewer during session 32).
+                await sidecar.waitForInteractiveIdle(token);
+                if (token.isCancellationRequested) {
+                    return;
+                }
+
+                try {
+                    await generateAndCache(sidecar, cache, resolved, 'background');
+                    generated++;
+                    this.progress!.generated = generated;
+                    this.recordGenerationCompletion();
+                    this.output.appendLine(`background-index: generated ${resolved.fnId}`);
+                } catch (err) {
+                    failed++;
+                    this.progress!.failed = failed;
+                    this.output.appendLine(
+                        `background-index: generate_explanation failed for ${resolved.fnId}: ${String(err)}`
+                    );
+                }
                 this.updateStatusBar();
-                continue;
-            }
 
-            const cached = cache.lookup({
-                fnId: resolved.fnId,
-                fnHash: resolved.fnHash,
-                modelId: resolveModelId(),
-                embeddingModelId: EMBEDDING_MODEL_ID,
-                promptVersion: PROMPT_VERSION,
-            });
-            if (cached) {
-                skipped++;
-                this.progress.skipped = skipped;
-                this.updateStatusBar();
-                continue;
+                await this.delay(DELAY_BETWEEN_GENERATIONS_MS, token);
             }
+        };
 
-            // Session 32: defer to any hover-miss/save-reindex/refresh
-            // request that's pending or arrives in the settle window --
-            // once this generate_explanation call is actually sent, nothing
-            // can preempt it (the sidecar dispatches strictly one request at
-            // a time, Core Rule 11), so this is the only point that can
-            // still avoid starting a new collision. See
-            // SidecarManager.waitForInteractiveIdle's doc comment.
-            //
-            // Passing `token` lets `waitForInteractiveIdle` itself resolve
-            // early on cancellation (moved into `SidecarManager` in Session
-            // 36 so `BackgroundFlushManager`/`GitHookReindexManager` get the
-            // same responsiveness for free instead of each needing their own
-            // copy of this session's original `raceAgainstCancellation`
-            // wrapper) -- without it, a steady stream of interactive
-            // activity could otherwise leave this parked for an extended,
-            // unbounded stretch, during which "Cancel Background Indexing"
-            // would silently have no effect (found by code-reviewer during
-            // session 32).
-            await sidecar.waitForInteractiveIdle(token);
-            if (token.isCancellationRequested) {
-                break;
-            }
-
-            const startedAt = Date.now();
-            try {
-                await generateAndCache(sidecar, cache, resolved, 'background');
-                generated++;
-                this.progress.generated = generated;
-                this.recordGenerationDuration(Date.now() - startedAt);
-                this.output.appendLine(`background-index: generated ${resolved.fnId}`);
-            } catch (err) {
-                failed++;
-                this.progress.failed = failed;
-                this.output.appendLine(
-                    `background-index: generate_explanation failed for ${resolved.fnId}: ${String(err)}`
-                );
-            }
-            this.updateStatusBar();
-
-            await this.delay(DELAY_BETWEEN_GENERATIONS_MS, token);
-        }
+        const workerCount = Math.max(1, this.concurrency);
+        await Promise.all(Array.from({ length: workerCount }, () => worker()));
 
         const status = token.isCancellationRequested ? (this.getPhase() === 'pausing' ? 'paused' : 'canceled') : 'done';
         let summary = `${generated} generated, ${skipped} already cached, ${unresolved} unresolved`;
@@ -426,22 +508,32 @@ export class BackgroundIndexManager implements vscode.Disposable {
     }
 
     /**
-     * Feeds `this.progress.etaMs` from a rolling average of the last
-     * `ETA_WINDOW_SIZE` successful generation durations (Session 64). Only
-     * successful generations are sampled -- a cache-hit skip took no
-     * generation time, and a failed call's duration isn't representative of
-     * how long a real generation takes. `this.progress` is always set before
-     * this is called (from inside `run()`'s loop, after the loop's own
-     * `this.progress = {...}` assignment).
+     * Feeds `this.progress.etaMs` from the observed completions-per-ms rate
+     * over the last `ETA_WINDOW_SIZE` successful generations (Session 67 --
+     * see `ETA_WINDOW_SIZE`'s doc comment for why this replaced per-call
+     * duration averaging once several `generate_explanation` calls can be in
+     * flight at once). Only successful generations are sampled -- a
+     * cache-hit skip took no generation time, and a failed call isn't
+     * representative of real generation pace. `this.progress` and
+     * `generationCompletionTimestamps`'s seed are always set before this is
+     * called (from inside `run()`'s worker loop, after the loop's own
+     * `this.progress = {...}`/seed assignment).
      */
-    private recordGenerationDuration(durationMs: number): void {
-        this.generationDurations.push(durationMs);
-        if (this.generationDurations.length > ETA_WINDOW_SIZE) {
-            this.generationDurations.shift();
+    private recordGenerationCompletion(): void {
+        const now = Date.now();
+        this.generationCompletionTimestamps.push(now);
+        if (this.generationCompletionTimestamps.length > ETA_WINDOW_SIZE + 1) {
+            this.generationCompletionTimestamps.shift();
         }
-        const avgMs = this.generationDurations.reduce((a, b) => a + b, 0) / this.generationDurations.length;
+        const first = this.generationCompletionTimestamps[0];
+        const completions = this.generationCompletionTimestamps.length - 1;
+        const elapsedMs = now - first;
+        if (completions <= 0 || elapsedMs <= 0) {
+            return;
+        }
+        const rate = completions / elapsedMs;
         const remaining = this.progress!.total - doneCount(this.progress!);
-        this.progress!.etaMs = Math.max(0, remaining) * avgMs;
+        this.progress!.etaMs = Math.max(0, remaining) / rate;
     }
 
     /** `this.phase === 'pausing'` distinguishes a user-initiated `pause()` from a plain teardown cancel (`dispose()`) -- only the former should leave the pass resumable. */
@@ -456,7 +548,7 @@ export class BackgroundIndexManager implements vscode.Disposable {
         // later run.
         if (this.phase === 'idle') {
             this.progress = undefined;
-            this.generationDurations = [];
+            this.generationCompletionTimestamps = [];
         }
         this.updateStatusBar();
     }
