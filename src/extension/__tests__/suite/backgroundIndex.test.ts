@@ -545,4 +545,118 @@ suite('backgroundIndex pause/resume (Session 52)', () => {
         // doubling this value.
         assert.strictEqual(capturedEtaMs, capturedDurations![0]);
     });
+
+    /**
+     * Session 66: narrows the default pass to the highest-importance slice
+     * of the ranked list instead of the whole repo. `lucidHover.
+     * backgroundIndexScope`/`backgroundIndexTopN` are real settings read via
+     * `vscode.workspace.getConfiguration`, so these tests set them for real
+     * (`ConfigurationTarget.Global`, since the test workspace here is a bare
+     * temp dir with no workspace folder to scope a `Workspace`-target update
+     * to) and always reset them back to unset in a `finally`, so a failure
+     * mid-test can't leak the override into a later test in this same
+     * Extension Development Host process.
+     */
+    async function setConfig(key: string, value: unknown): Promise<void> {
+        await vscode.workspace.getConfiguration('lucidHover').update(key, value, vscode.ConfigurationTarget.Global);
+    }
+
+    test('default scope (topN, unset) indexes every ranked function when there are fewer than the default 200 (Session 66)', async function () {
+        this.timeout(20_000);
+
+        sandbox.stub(sidecar, 'waitForInteractiveIdle').resolves();
+        const requestStub = sandbox.stub(sidecar, 'request');
+        requestStub.withArgs('list_ranked_functions').resolves({
+            functions: [
+                { rel_fname: 'a.js', name: 'a', line: 0, importance: 2 },
+                { rel_fname: 'b.js', name: 'b', line: 0, importance: 1 },
+            ],
+        });
+        requestStub.withArgs('generate_explanation').resolves({
+            context_hash: 'ctx',
+            context_tier: 'call_graph_only',
+            explanation: { role_tag: 'utility', one_liner: 'explained' },
+        });
+
+        manager.start();
+        await waitForPhase('idle');
+
+        assert.strictEqual(
+            requestStub.getCalls().filter((c) => c.args[0] === 'generate_explanation').length,
+            2,
+            'expected both ranked functions to be generated -- the default topN (200) exceeds this test\'s ranked-list size, so nothing should be truncated'
+        );
+    });
+
+    test('a small backgroundIndexTopN truncates the pass to only the top-N most important functions (Session 66)', async function () {
+        this.timeout(20_000);
+        await setConfig('backgroundIndexTopN', 1);
+        try {
+            sandbox.stub(sidecar, 'waitForInteractiveIdle').resolves();
+            const requestStub = sandbox.stub(sidecar, 'request');
+            requestStub.withArgs('list_ranked_functions').resolves({
+                functions: [
+                    { rel_fname: 'a.js', name: 'a', line: 0, importance: 2 },
+                    { rel_fname: 'b.js', name: 'b', line: 0, importance: 1 },
+                ],
+            });
+            requestStub.withArgs('generate_explanation').resolves({
+                context_hash: 'ctx',
+                context_tier: 'call_graph_only',
+                explanation: { role_tag: 'utility', one_liner: 'explained' },
+            });
+
+            manager.start();
+            await waitForPhase('idle');
+
+            const generateCalls = requestStub.getCalls().filter((c) => c.args[0] === 'generate_explanation');
+            assert.strictEqual(generateCalls.length, 1, 'expected only the top-1 (by importance) function to be generated');
+            assert.strictEqual(
+                (generateCalls[0].args[1] as { name: string }).name,
+                'a',
+                'expected the single generated function to be the higher-importance one (a, importance 2), not b (importance 1)'
+            );
+
+            const statusBarItem = (manager as unknown as { statusBarItem: vscode.StatusBarItem }).statusBarItem;
+            assert.ok(
+                (statusBarItem.tooltip as string).includes('(100% of 1)'),
+                `expected progress total to reflect the truncated scope (1), not the full ranked list (2), got: ${statusBarItem.tooltip}`
+            );
+        } finally {
+            await setConfig('backgroundIndexTopN', undefined);
+        }
+    });
+
+    test('backgroundIndexScope "fullRepo" opts out of the topN truncation even when backgroundIndexTopN is small (Session 66)', async function () {
+        this.timeout(20_000);
+        await setConfig('backgroundIndexScope', 'fullRepo');
+        await setConfig('backgroundIndexTopN', 1);
+        try {
+            sandbox.stub(sidecar, 'waitForInteractiveIdle').resolves();
+            const requestStub = sandbox.stub(sidecar, 'request');
+            requestStub.withArgs('list_ranked_functions').resolves({
+                functions: [
+                    { rel_fname: 'a.js', name: 'a', line: 0, importance: 2 },
+                    { rel_fname: 'b.js', name: 'b', line: 0, importance: 1 },
+                ],
+            });
+            requestStub.withArgs('generate_explanation').resolves({
+                context_hash: 'ctx',
+                context_tier: 'call_graph_only',
+                explanation: { role_tag: 'utility', one_liner: 'explained' },
+            });
+
+            manager.start();
+            await waitForPhase('idle');
+
+            assert.strictEqual(
+                requestStub.getCalls().filter((c) => c.args[0] === 'generate_explanation').length,
+                2,
+                'expected "fullRepo" scope to index every ranked function, ignoring backgroundIndexTopN entirely'
+            );
+        } finally {
+            await setConfig('backgroundIndexScope', undefined);
+            await setConfig('backgroundIndexTopN', undefined);
+        }
+    });
 });

@@ -143,6 +143,42 @@ export const EMBEDDING_MODEL_ID = 'all-minilm';
 export const PROMPT_VERSION = 'few-shot-v5';
 
 /**
+ * Session 66: default background-indexing scope. A full-repo pass
+ * (`BackgroundIndexManager.run()`'s original Session 9 behavior) projected
+ * ~16 hours on a real 6,633-function repo (pokerogue) -- Core Rule 4's
+ * cache-miss hover fallback exists precisely so this exhaustiveness isn't
+ * required for correctness, so `'topN'` (the highest-importance functions
+ * only, per `resolveBackgroundIndexTopN()`) is the new default. `'fullRepo'`
+ * keeps the old behavior available as an explicit opt-in, per the user's own
+ * choice when this was put to them via `AskUserQuestion` rather than decided
+ * unilaterally. An unrecognized value falls back to `'topN'`, same
+ * unset-falls-back-to-default pattern as `resolveModelId()` above.
+ */
+export type BackgroundIndexScope = 'topN' | 'fullRepo';
+
+export function resolveBackgroundIndexScope(): BackgroundIndexScope {
+    const configured = vscode.workspace.getConfiguration('lucidHover').get<string>('backgroundIndexScope');
+    return configured === 'fullRepo' ? 'fullRepo' : 'topN';
+}
+
+/**
+ * Session 66: how many of the ranked functions a `'topN'`-scoped pass covers.
+ * `list_ranked_functions` already returns its result sorted by importance
+ * descending (`rpc_server.py`'s `_handle_list_ranked_functions`), so this is
+ * a plain client-side slice of that list -- no new RPC, no sidecar change.
+ * 200 was chosen as a default that finishes in on the order of tens of
+ * minutes rather than hours at pokerogue's measured per-function generation
+ * pace, while still covering the functions most likely to be hovered first.
+ * Only consulted when `resolveBackgroundIndexScope()` is `'topN'`.
+ */
+export function resolveBackgroundIndexTopN(): number {
+    const configured = vscode.workspace.getConfiguration('lucidHover').get<number>('backgroundIndexTopN');
+    return typeof configured === 'number' && Number.isFinite(configured) && configured >= 1
+        ? Math.floor(configured)
+        : 200;
+}
+
+/**
  * Session 15 (Build Order step 15, secondary summary-doc generator,
  * post-MVP): prompt version for the new per-file/module purpose-paragraph
  * synthesis call (sidecar/generation/prompt.py's `build_file_summary_prompt`
