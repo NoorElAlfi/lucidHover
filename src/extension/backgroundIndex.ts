@@ -191,8 +191,26 @@ export class BackgroundIndexManager implements vscode.Disposable {
         this.updateStatusBar();
     }
 
+    /**
+     * Guards against `'pausing'` as well as `'running'` (Session 69 fix) --
+     * `toggle()`'s own `phase === 'paused'` check happens to keep a plain
+     * status-bar click from ever calling `resume()`/`start()` while a pause
+     * is still draining its in-flight workers, but `start()` is public and
+     * was previously safe only by accident of its one caller's care, not by
+     * its own guard: a second, direct `start()`/`resume()` call made while
+     * `'pausing'` (before the drain reaches `'paused'`) would kick off a
+     * second, fully concurrent `run()` on top of the first pass's own
+     * still-finishing workers -- up to `BACKGROUND_INDEX_CONCURRENCY + 1`
+     * concurrent `generate_explanation` calls instead of at most
+     * `BACKGROUND_INDEX_CONCURRENCY` (flagged by Session 67's code-reviewer,
+     * not fixed there since raising the pool size was that session's actual
+     * scope). A call made mid-pause is now a silent no-op, exactly like
+     * calling `start()` while already `'running'` -- the user chose this
+     * over a queued auto-resume (AskUserQuestion, Session 69): simpler, no
+     * new state, and matches `pause()`'s own no-op-if-nothing-to-do shape.
+     */
     start(): void {
-        if (this.phase === 'running') {
+        if (this.phase === 'running' || this.phase === 'pausing') {
             return;
         }
         void this.run();
@@ -200,13 +218,13 @@ export class BackgroundIndexManager implements vscode.Disposable {
 
     /**
      * Thin wrapper around `start()` (Session 52) -- `start()` already treats
-     * "not currently running" uniformly whether that's because a pass never
-     * started or because the user paused a previous one, and every entry's
-     * own `cache.lookup()` inside `run()` already makes re-running skip
-     * whatever finished before the pause, so a plain re-`start()` already is
-     * a real resume, not a restart-from-scratch. Kept as its own named
-     * method purely so the pause/resume pairing is discoverable in the
-     * public API.
+     * "not currently running or draining a pause" uniformly whether that's
+     * because a pass never started, is still finishing its pause, or the
+     * user paused a previous one to completion, and every entry's own
+     * `cache.lookup()` inside `run()` already makes re-running skip whatever
+     * finished before the pause, so a plain re-`start()` already is a real
+     * resume, not a restart-from-scratch. Kept as its own named method
+     * purely so the pause/resume pairing is discoverable in the public API.
      */
     resume(): void {
         this.start();
