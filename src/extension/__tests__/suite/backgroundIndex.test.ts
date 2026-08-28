@@ -935,5 +935,69 @@ suite('backgroundIndex pause/resume (Session 52)', () => {
                 'expected a defined, non-negative ETA once at least one generation had completed, even under concurrency'
             );
         });
+
+        test('resume()/start() called mid-pause is a no-op, never starting a second concurrent pass (Session 69 fix)', async function () {
+            this.timeout(20_000);
+
+            sandbox.stub(sidecar, 'waitForInteractiveIdle').resolves();
+            const requestStub = sandbox.stub(sidecar, 'request');
+            requestStub.withArgs('list_ranked_functions').resolves({ functions: fourFunctionsRanked });
+
+            let startedCount = 0;
+            let releaseHeldCalls: (() => void) | undefined;
+            const held = new Promise<void>((resolve) => {
+                releaseHeldCalls = resolve;
+            });
+            requestStub.withArgs('generate_explanation').callsFake(async (_method: string, rawParams: unknown) => {
+                const params = rawParams as { name: string };
+                startedCount++;
+                if (startedCount === 2) {
+                    poolManager!.pause();
+                    // Phase is now 'pausing', with both of the pool's workers
+                    // still holding on `held` below -- exactly the window the
+                    // code-reviewer flagged in Session 67: before this
+                    // session's `start()` guard fix, a direct resume()/
+                    // start() call landing right here would have kicked off a
+                    // second, fully concurrent run() on top of these two
+                    // still-in-flight generations, instead of being a no-op
+                    // until the pause actually finishes draining.
+                    poolManager!.resume();
+                    assert.strictEqual(
+                        poolManager!.getPhase(),
+                        'pausing',
+                        'expected resume() called mid-pause to leave the phase at "pausing", not flip it back to "running"'
+                    );
+                }
+                await held;
+                return {
+                    context_hash: 'ctx',
+                    context_tier: 'call_graph_only',
+                    explanation: { role_tag: 'utility', one_liner: `explained ${params.name}` },
+                };
+            });
+
+            poolManager = new BackgroundIndexManager(() => tempDir, () => cache, () => sidecar, output, 2);
+            poolManager.start();
+
+            const startedDeadline = Date.now() + 15_000;
+            while (startedCount < 2 && Date.now() < startedDeadline) {
+                await new Promise((resolve) => setTimeout(resolve, 20));
+            }
+            assert.strictEqual(startedCount, 2, 'expected both initial workers to have started their generate_explanation call');
+
+            releaseHeldCalls!();
+
+            const pausedDeadline = Date.now() + 15_000;
+            while (poolManager.getPhase() !== 'paused' && Date.now() < pausedDeadline) {
+                await new Promise((resolve) => setTimeout(resolve, 20));
+            }
+            assert.strictEqual(poolManager.getPhase(), 'paused', 'expected the single pass to finish draining into "paused"');
+
+            assert.strictEqual(
+                requestStub.getCalls().filter((c) => c.args[0] === 'generate_explanation').length,
+                2,
+                'expected exactly the 2 already-in-flight generate_explanation calls, never a 3rd/4th from a second concurrent pass'
+            );
+        });
     });
 });
