@@ -17,9 +17,18 @@ First public-readiness snapshot. Highlights:
 - CodeLens role badges and gutter icons.
 - Blast radius and execution trace graph views, sharing the same card-based visual design as the
   explanation panel, with inline branch expansion on execution traces.
+- Cluster summary: a synthesized purpose paragraph over a function and its transitive callers,
+  built only from already-cached explanations and generated only on an explicit "Synthesize
+  summary" action, never automatically.
 - "Show Most Important Functions" and "Search Explanations" quick pick commands.
 - "Prioritize Indexing for This File" and pausable/resumable background indexing, with a live
-  progress count, per-function breakdown, and time-remaining estimate in the status bar.
+  progress count (including failed attempts), the function currently being processed, a
+  time-remaining estimate, and repo-wide coverage against the configured scope once a pass
+  completes, all in the status bar.
+- Startup background indexing defaults to the repo's most important functions
+  (`lucidHover.backgroundIndexScope` / `lucidHover.backgroundIndexTopN`), with full-repo indexing
+  available as an explicit opt-in — functions outside the scope are still generated the first time
+  they're hovered.
 - Full layered change-detection model: dirty-tracking, debounced save, periodic flush, git hooks,
   manual refresh.
 - Local embeddings + retrieval (Ollama + LanceDB) folded into generation context.

@@ -35,6 +35,9 @@ back to a one-off synchronous generation on hover, so nothing hovering ever show
 - **Blast radius** — see everything that transitively depends on a function before you change it.
 - **Execution trace** — follow a function's primary call chain forward, with inline branches for
   alternate paths.
+- **Cluster summary** — a synthesized purpose paragraph over a function and its transitive callers,
+  built from already-cached explanations (an explicit "Synthesize summary" action, never generated
+  automatically).
 - **CodeLens role badges + gutter icons** — see each function's role at a glance without hovering.
 - **Show Most Important Functions** — a quick pick of the codebase's highest-importance functions,
   for orienting yourself in an unfamiliar repo.
@@ -42,8 +45,10 @@ back to a one-off synchronous generation on hover, so nothing hovering ever show
 - **Prioritize Indexing for This File** — jump a file's functions to the front of the background
   indexing queue.
 - **Pause/Resume Background Indexing** — a status bar toggle for when you want indexing to yield
-  CPU/Ollama capacity to something else, showing a live progress count, per-function breakdown, and
-  an estimated time remaining in the tooltip.
+  CPU/Ollama capacity to something else, showing a live progress count (including failed attempts),
+  the function currently being processed, an estimated time remaining, and repo-wide coverage once
+  a pass finishes, all in the tooltip. Only the most important functions are indexed up front by
+  default — everything else is generated the first time you hover it.
 - **Summary docs** — generate per-file Markdown summaries from already-cached explanations.
 - **Automatic staleness tracking** — edits and cross-file changes flag affected explanations as
   stale so you know when what you're reading no longer matches the code.
@@ -60,6 +65,8 @@ All commands are available from the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift
 | LucidHover: Prioritize Indexing for This File | Jumps this file's uncached functions to the front of the queue (also in the editor context menu) |
 | LucidHover: Show Blast Radius for Function Under Cursor | Shows everything that depends on the current function |
 | LucidHover: Trace Execution Path from Function Under Cursor | Follows the current function's downstream call chain |
+| LucidHover: Show Cluster Summary for Function Under Cursor | Shows a synthesized purpose summary for the function and its transitive callers |
+| LucidHover: Synthesize Cluster Summary for Function Under Cursor | Generates (and caches) the cluster summary above from cached explanations |
 | LucidHover: Show Most Important Functions | Quick pick of the codebase's highest-ranked functions |
 | LucidHover: Search Explanations | Fuzzy-search cached explanations |
 | LucidHover: Generate Summary Docs | Writes per-file Markdown summaries to `docs/wiki/` |
@@ -75,6 +82,8 @@ All commands are available from the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift
 | `lucidHover.ollamaEndpoint` | `http://localhost:11434` | Local Ollama endpoint (loopback only — non-local hosts are rejected) |
 | `lucidHover.backgroundFlushIntervalSeconds` | `25` | How often edited-but-unsaved functions are regenerated in the background |
 | `lucidHover.autoEvictSupersededCache` | `true` | Automatically delete a function's old cache row when it's regenerated |
+| `lucidHover.backgroundIndexScope` | `topN` | `topN` pre-generates only the most important functions on startup; `fullRepo` indexes everything up front |
+| `lucidHover.backgroundIndexTopN` | `200` | How many top-importance functions the startup pass covers when scope is `topN` |
 
 ## Privacy
 
