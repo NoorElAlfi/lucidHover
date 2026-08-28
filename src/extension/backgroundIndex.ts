@@ -37,37 +37,43 @@ type BackgroundIndexPhase = 'idle' | 'running' | 'pausing' | 'paused';
 const DELAY_BETWEEN_GENERATIONS_MS = 1000;
 
 /**
- * Session 67: how many `generate_explanation` calls this pass runs
- * concurrently, closing the strategy review's #2 backlog item (raising
- * background indexing off a strictly-one-at-a-time loop). Every worker still
- * calls `sidecar.waitForInteractiveIdle(token)` before its own
- * `generate_explanation` call, so interactive traffic keeps identical
- * priority to before this session -- only background-vs-background
- * concurrency changes (Core Rule 11 already established that this
- * background-vs-background race is safe, just previously unmeasured for a
- * real worker pool).
- *
- * Set lower than the session brief's own 3-4-worker starting point, on a
- * fresh live measurement against real Ollama on this machine (see the
- * session-67 artifact for the full methodology and numbers) that came out
- * substantially less favorable than the strategy review's earlier
- * 1.00x/1.57x/2.22x/2.78x throughput figures at N=1/2/4/8: this machine
- * today showed real throughput gains flattening out (and getting noisy)
- * past N=2, and -- the more decisive number -- real added interactive
- * latency from a background pool already in flight grew roughly linearly
- * with pool size (~+2s per additional concurrent worker), blowing well past
- * session 36's <1s acceptance bar at any pool size, not just at the high
- * end. `2` was chosen as the conservative reading of that data: it captured
- * the best measured throughput (2.60x) while limiting the worker-pool-
- * specific added-latency cost (beyond the single-collision floor sessions
- * 36/37 already characterized as pre-existing and unavoidable) to roughly
- * one increment rather than compounding it across 3-4 simultaneous workers.
- * This numeric gap from the brief's own reference figures is flagged, not
- * resolved, in the artifact -- a future session with a quieter measurement
- * environment should re-check it rather than assume today's number is the
- * last word.
+ * Session 71: reverted to `1` -- back to a strictly-one-at-a-time
+ * background loop, closing the collision-frequency follow-up sessions
+ * 67/69/70 all carried forward. Session 67 shipped `2` on severity data
+ * alone (added interactive latency once a collision occurs); session 70
+ * then measured that a real collision at the actual shipped pool size 2
+ * costs a mean +2.29s, well over session 36's <1s bar, but stopped short of
+ * a change because it had no data on how often a real collision actually
+ * happens. Session 71 supplied that missing half: a real, continuous
+ * 241s run of the shipped 2-worker/1s-delay schedule against real Ollama
+ * found both workers simultaneously busy 75.7% of wall-clock time, one busy
+ * 22.5%, and idle only 1.9% -- meaning that whenever a background pass is
+ * actually running, the large majority of any interactive request
+ * (hover-miss/save-reindex/refresh) lands in the *severe* (+2.29s) state,
+ * not the mild (+0.6s, at pool size 1) one. That active window is real and
+ * measured too: `list_ranked_functions`/the default `topN=200` scope
+ * finishes in ~12.6 minutes at this throughput, running exactly once per
+ * trusted-workspace-open (see `run()`'s single call site in `extension.ts`)
+ * -- squarely the window when a user is most likely opening files and
+ * hovering to understand a codebase they just opened, not a rare edge case.
+ * A candidate `DELAY_BETWEEN_GENERATIONS_MS = 3000` was also live-measured
+ * as a possible fix instead of reverting concurrency: it only knocked the
+ * severe-state probability from 75.7% to 60.4% while stretching the active
+ * window ~25% longer (12.6 -> 15.8 min) -- a real but too-weak lever to
+ * rely on alone. Put to the user via `AskUserQuestion` with all of the
+ * above (frequency and severity together, not severity alone, per session
+ * 70's own explicit reasoning for not deciding unilaterally); the user
+ * chose this revert over leaving `2` as-is or raising the delay instead.
+ * `1` restores the well-under-bar ~0.6s single-collision floor session
+ * 36/37 already characterized as pre-existing and unavoidable, for every
+ * collision, at the cost of the real measured 1.74x-3.25x background
+ * throughput gain session 67 found (pass duration roughly doubles). The
+ * worker-pool machinery itself (`claimNext()`/`fileSymbolPromises`/the
+ * injectable `concurrency` param) is untouched -- still exercised by the
+ * "concurrent worker pool (Session 67)" test suite at higher pool sizes,
+ * available again if a future session's data supports raising this back up.
  */
-const BACKGROUND_INDEX_CONCURRENCY = 2;
+const BACKGROUND_INDEX_CONCURRENCY = 1;
 
 /**
  * Session 64: how many of the most recent successful-generation completion
