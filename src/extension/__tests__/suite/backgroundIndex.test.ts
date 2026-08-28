@@ -70,6 +70,30 @@ suite('backgroundIndex pause/resume (Session 52)', () => {
         }
     }
 
+    /**
+     * Session 72: polls for an exact status-bar text value instead of
+     * inspecting it after `waitForPhase('idle')` -- since Session 72's idle
+     * state now rewrites the status-bar item to show repo-wide coverage
+     * (rather than just hiding it, leaving the last 'running' text/tooltip
+     * untouched), a leftover-after-idle snapshot no longer reflects the
+     * final 'running'-phase breakdown. `DELAY_BETWEEN_GENERATIONS_MS`
+     * (1000ms) creates a real, deterministic ~1s window after the last item
+     * completes but before the pass transitions to idle, wide enough for
+     * this poll (20ms interval) to reliably observe the 100%-complete
+     * 'running' text -- not a race, since the delay itself is what holds
+     * the phase at 'running' that long.
+     */
+    async function waitForStatusBarText(expected: string, timeoutMs = 5000): Promise<void> {
+        const statusBarItem = (manager as unknown as { statusBarItem: vscode.StatusBarItem }).statusBarItem;
+        const start = Date.now();
+        while (statusBarItem.text !== expected) {
+            if (Date.now() - start > timeoutMs) {
+                assert.fail(`timed out waiting for status bar text "${expected}"; last text was "${statusBarItem.text}"`);
+            }
+            await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+    }
+
     const aContent = 'function a() {\n  return 1;\n}\n';
     const bContent = 'function b() {\n  return 2;\n}\n';
 
@@ -265,6 +289,46 @@ suite('backgroundIndex pause/resume (Session 52)', () => {
         ]);
     });
 
+    test('the tooltip names the most-recently-claimed function while a pass runs (Session 72)', async function () {
+        this.timeout(20_000);
+
+        sandbox.stub(sidecar, 'waitForInteractiveIdle').resolves();
+        const requestStub = sandbox.stub(sidecar, 'request');
+        requestStub.withArgs('list_ranked_functions').resolves({
+            functions: [
+                { rel_fname: 'a.js', name: 'a', line: 0, importance: 2 },
+                { rel_fname: 'b.js', name: 'b', line: 0, importance: 1 },
+            ],
+        });
+
+        const tooltipsDuringGeneration: string[] = [];
+        requestStub.withArgs('generate_explanation').callsFake(async (_method: string, rawParams: unknown) => {
+            const params = rawParams as { name: string };
+            const statusBarItem = (manager as unknown as { statusBarItem: vscode.StatusBarItem }).statusBarItem;
+            // Captured mid-call -- proves the name is set as soon as this
+            // entry is claimed (before waitForInteractiveIdle/generateAndCache
+            // even resolve), not only after it finishes.
+            tooltipsDuringGeneration.push(statusBarItem.tooltip as string);
+            return {
+                context_hash: 'ctx',
+                context_tier: 'call_graph_only',
+                explanation: { role_tag: 'utility', one_liner: `explained ${params.name}` },
+            };
+        });
+
+        manager.start();
+        await waitForPhase('idle');
+
+        assert.ok(
+            tooltipsDuringGeneration[0].includes('Last claimed: a.js: a'),
+            `expected the first claimed function to be named, got: ${tooltipsDuringGeneration[0]}`
+        );
+        assert.ok(
+            tooltipsDuringGeneration[1].includes('Last claimed: b.js: b'),
+            `expected the second claim to overwrite the first (single most-recent, not a list), got: ${tooltipsDuringGeneration[1]}`
+        );
+    });
+
     test('the progress count survives into the paused state, frozen at the point of pause (Session 64)', async function () {
         this.timeout(20_000);
 
@@ -420,24 +484,20 @@ suite('backgroundIndex pause/resume (Session 52)', () => {
         });
 
         manager.start();
-        await waitForPhase('idle');
 
-        // `updateStatusBar()`'s 'idle' case only hides the item -- it
-        // doesn't rewrite text/tooltip -- so what's left here is the last
-        // value written by the loop itself, after b() (the final entry)
-        // completed.
+        // Session 72: caught while still 'running', during the real
+        // post-completion DELAY_BETWEEN_GENERATIONS_MS window -- see
+        // waitForStatusBarText's doc comment for why this isn't a race.
+        await waitForStatusBarText('$(sync~spin) LucidHover: indexing 2/2');
         const statusBarItem = (manager as unknown as { statusBarItem: vscode.StatusBarItem }).statusBarItem;
-        assert.strictEqual(
-            statusBarItem.text,
-            '$(sync~spin) LucidHover: indexing 2/2',
-            'a failed attempt must still count toward the fraction reaching total, not leave it stuck below 100%'
-        );
         assert.ok(
             (statusBarItem.tooltip as string).includes(
                 '1 generated, 0 already cached, 0 unresolved, 1 failed (100% of 2)'
             ),
             `expected the breakdown to reach 100% and append the failed clause, got: ${statusBarItem.tooltip}`
         );
+
+        await waitForPhase('idle');
     });
 
     test('the completion toast includes the failure count when nonzero and omits it (unchanged wording) when zero (Session 65)', async function () {
@@ -638,6 +698,16 @@ suite('backgroundIndex pause/resume (Session 52)', () => {
             });
 
             manager.start();
+
+            // Session 72: caught while still 'running' -- see
+            // waitForStatusBarText's doc comment.
+            await waitForStatusBarText('$(sync~spin) LucidHover: indexing 1/1');
+            const statusBarItem = (manager as unknown as { statusBarItem: vscode.StatusBarItem }).statusBarItem;
+            assert.ok(
+                (statusBarItem.tooltip as string).includes('(100% of 1)'),
+                `expected progress total to reflect the truncated scope (1), not the full ranked list (2), got: ${statusBarItem.tooltip}`
+            );
+
             await waitForPhase('idle');
 
             const generateCalls = requestStub.getCalls().filter((c) => c.args[0] === 'generate_explanation');
@@ -647,11 +717,51 @@ suite('backgroundIndex pause/resume (Session 52)', () => {
                 'a',
                 'expected the single generated function to be the higher-importance one (a, importance 2), not b (importance 1)'
             );
+        } finally {
+            await setConfig('backgroundIndexTopN', undefined);
+        }
+    });
+
+    test('idle-phase status bar shows repo-wide coverage against the configured scope after a full pass completes (Session 72)', async function () {
+        this.timeout(20_000);
+        await setConfig('backgroundIndexTopN', 1);
+        try {
+            sandbox.stub(sidecar, 'waitForInteractiveIdle').resolves();
+            const requestStub = sandbox.stub(sidecar, 'request');
+            requestStub.withArgs('list_ranked_functions').resolves({
+                functions: [
+                    { rel_fname: 'a.js', name: 'a', line: 0, importance: 2 },
+                    { rel_fname: 'b.js', name: 'b', line: 0, importance: 1 },
+                ],
+            });
+            requestStub.withArgs('generate_explanation').resolves({
+                context_hash: 'ctx',
+                context_tier: 'call_graph_only',
+                explanation: { role_tag: 'utility', one_liner: 'explained' },
+            });
 
             const statusBarItem = (manager as unknown as { statusBarItem: vscode.StatusBarItem }).statusBarItem;
+            const textBeforeAnyPass = statusBarItem.text;
+
+            manager.start();
+            await waitForPhase('idle');
+
+            // Coverage is computed against the truncated topN scope (1),
+            // not the full ranked list (2) -- the user's explicit choice
+            // (AskUserQuestion) for what the stat's denominator means.
+            assert.strictEqual(
+                statusBarItem.text,
+                '$(check) LucidHover: 1/1 explained',
+                'expected the idle-phase status bar to show coverage against the configured scope, not the whole repo'
+            );
             assert.ok(
-                (statusBarItem.tooltip as string).includes('(100% of 1)'),
-                `expected progress total to reflect the truncated scope (1), not the full ranked list (2), got: ${statusBarItem.tooltip}`
+                (statusBarItem.tooltip as string).includes('1/1, 100%'),
+                `expected the tooltip to spell out the coverage fraction, got: ${statusBarItem.tooltip}`
+            );
+            assert.notStrictEqual(
+                statusBarItem.text,
+                textBeforeAnyPass,
+                'expected the idle status bar to change once a pass has completed, not stay at its pre-pass state forever'
             );
         } finally {
             await setConfig('backgroundIndexTopN', undefined);

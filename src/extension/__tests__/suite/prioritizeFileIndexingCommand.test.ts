@@ -132,6 +132,56 @@ suite('prioritizeFileIndexingCommand (Session 54)', () => {
         assert.ok(lookup(c!), 'expected c() to now be cached');
     });
 
+    test('reports advancing progress at a status-bar (Window) location while generating (Session 72)', async function () {
+        this.timeout(20_000);
+
+        const document = await vscode.workspace.openTextDocument(path.join(tempDir, 'file.js'));
+        sandbox.stub(sidecar, 'waitForInteractiveIdle').resolves();
+        const requestStub = sandbox.stub(sidecar, 'request');
+        requestStub.withArgs('generate_explanation').resolves({
+            context_hash: 'ctx',
+            context_tier: 'call_graph_only',
+            explanation: { role_tag: 'utility', one_liner: 'explained' },
+        });
+
+        const reports: Array<{ message?: string; increment?: number }> = [];
+        const withProgressStub = sandbox
+            .stub(vscode.window, 'withProgress')
+            .callsFake(
+                async (
+                    options: vscode.ProgressOptions,
+                    task: (
+                        progress: vscode.Progress<{ message?: string; increment?: number }>,
+                        token: vscode.CancellationToken
+                    ) => Thenable<unknown>
+                ) => {
+                    assert.strictEqual(
+                        options.location,
+                        vscode.ProgressLocation.Window,
+                        "expected a status-bar-area (Window) progress indicator, matching BackgroundIndexManager's own pattern"
+                    );
+                    assert.ok(
+                        (options.title as string).includes('file.js'),
+                        `expected the title to name the file being prioritized, got: ${options.title}`
+                    );
+                    const fakeToken = {
+                        isCancellationRequested: false,
+                        onCancellationRequested: () => ({ dispose: () => undefined }),
+                    } as vscode.CancellationToken;
+                    return task({ report: (v: { message?: string; increment?: number }) => reports.push(v) }, fakeToken);
+                }
+            );
+
+        await prioritizeFileIndexing(() => tempDir, () => cache, () => sidecar, output, document);
+
+        assert.strictEqual(withProgressStub.callCount, 1, 'expected exactly one withProgress call for the whole pass');
+        assert.deepStrictEqual(
+            reports.map((r) => r.message),
+            ['0/3', '1/3', '2/3', '3/3'],
+            'expected the message to advance once per generated function, ending at the full count'
+        );
+    });
+
     test('is a no-op (no generate_explanation calls) when every function is already cached', async function () {
         this.timeout(20_000);
 

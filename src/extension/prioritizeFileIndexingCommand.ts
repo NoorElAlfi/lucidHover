@@ -97,21 +97,41 @@ export async function prioritizeFileIndexing(
     }
 
     output.appendLine(`prioritize-file-indexing: ${relFile} -- ${targets.length} uncached function(s) to generate`);
-    vscode.window.setStatusBarMessage(
-        `LucidHover: prioritizing ${targets.length} function(s) in ${relFile}...`,
-        3000
-    );
 
+    // Session 72: a status-bar-area progress indicator (ProgressLocation.Window),
+    // not a notification toast -- matches BackgroundIndexManager's own
+    // status-bar pattern for indexing progress (user's explicit choice via
+    // AskUserQuestion). withProgress's own `report()` calls replace the
+    // start/done `setStatusBarMessage` calls this command used before --
+    // the progress item already occupies that same status-bar area for the
+    // duration of the run, including a final one-line summary before it
+    // clears.
     let generated = 0;
-    for (const fn of targets) {
-        await sidecar.waitForInteractiveIdle();
-        try {
-            await generateAndCache(sidecar, cache, fn, 'background');
-            generated++;
-        } catch (err) {
-            output.appendLine(`prioritize-file-indexing: generate_explanation failed for ${fn.fnId}: ${String(err)}`);
+    await vscode.window.withProgress(
+        {
+            location: vscode.ProgressLocation.Window,
+            title: `LucidHover: prioritizing ${relFile}`,
+        },
+        async (progress) => {
+            progress.report({ message: `0/${targets.length}` });
+            for (let i = 0; i < targets.length; i++) {
+                const fn = targets[i];
+                await sidecar.waitForInteractiveIdle();
+                try {
+                    await generateAndCache(sidecar, cache, fn, 'background');
+                    generated++;
+                } catch (err) {
+                    output.appendLine(
+                        `prioritize-file-indexing: generate_explanation failed for ${fn.fnId}: ${String(err)}`
+                    );
+                }
+                progress.report({
+                    increment: 100 / targets.length,
+                    message: `${i + 1}/${targets.length}`,
+                });
+            }
         }
-    }
+    );
 
     output.appendLine(`prioritize-file-indexing: ${relFile} done -- ${generated}/${targets.length} generated`);
     vscode.window.setStatusBarMessage(`LucidHover: prioritized indexing done for ${relFile}`, 3000);

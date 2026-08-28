@@ -93,7 +93,7 @@ const BACKGROUND_INDEX_CONCURRENCY = 1;
  */
 const ETA_WINDOW_SIZE = 5;
 
-/** Snapshot of a pass's progress, tracked as `run()`'s loop advances and frozen into 'pausing'/'paused' status-bar text so pausing doesn't lose the count (Session 64). `failed` (Session 65) counts a `generate_explanation` call that threw -- it's "done" for percentage/ETA purposes (nothing more will happen for that function this pass) but distinct from `generated`/`skipped`/`unresolved` since it's the one outcome that means the function still has no explanation. */
+/** Snapshot of a pass's progress, tracked as `run()`'s loop advances and frozen into 'pausing'/'paused' status-bar text so pausing doesn't lose the count (Session 64). `failed` (Session 65) counts a `generate_explanation` call that threw -- it's "done" for percentage/ETA purposes (nothing more will happen for that function this pass) but distinct from `generated`/`skipped`/`unresolved` since it's the one outcome that means the function still has no explanation. `currentFunctionName` (Session 72) is the most-recently-claimed function awaiting/undergoing generation -- a single field, not a per-worker set, per the user's explicit choice (`AskUserQuestion`): at today's `BACKGROUND_INDEX_CONCURRENCY = 1` it's always exactly the one in-flight function, and if concurrency is ever raised again it degrades to "the latest of however many are actually running" rather than a full list, which was judged simple enough to not need its own bookkeeping structure. */
 interface ProgressSnapshot {
     total: number;
     generated: number;
@@ -101,6 +101,7 @@ interface ProgressSnapshot {
     unresolved: number;
     failed: number;
     etaMs: number | undefined;
+    currentFunctionName: string | undefined;
 }
 
 interface RankedFunction {
@@ -165,6 +166,26 @@ export class BackgroundIndexManager implements vscode.Disposable {
 
     /** Current pass's progress, read by `updateStatusBar()`; `undefined` outside a running/pausing/paused pass (Session 64). */
     private progress: ProgressSnapshot | undefined;
+
+    /**
+     * Session 72: coverage snapshot from the most recent *fully completed*
+     * pass (`run()` reaching `status === 'done'`, i.e. every entry in scope
+     * was claimed -- not a pass that ended early via pause or cancellation),
+     * shown in the idle-phase status bar so a user can tell how much of the
+     * codebase has a cached explanation without needing a pass to be
+     * actively running. `total` is `ranked.length` -- the same
+     * scope-sliced (topN or fullRepo, per `resolveBackgroundIndexScope()`)
+     * count `ProgressSnapshot.total` used during the pass itself, per the
+     * user's explicit choice (`AskUserQuestion`) that this stat should read
+     * against the configured background-index scope, not the whole repo
+     * unconditionally -- a topN user should see it approach 100%, not stall
+     * forever short of the repo's real total. `covered` is
+     * `generated + skipped` -- both mean the function has a cache entry
+     * now; `unresolved`/`failed` don't. `undefined` until a pass has fully
+     * completed at least once (idle state stays hidden until then, same as
+     * before this session).
+     */
+    private lastCoverage: { covered: number; total: number } | undefined;
 
     /**
      * Rolling window of successful-generation completion timestamps
@@ -286,7 +307,17 @@ export class BackgroundIndexManager implements vscode.Disposable {
             breakdown += `, ${p.failed} failed`;
         }
         breakdown += ` (${pct}% of ${p.total})`;
-        const lines = [breakdown];
+        // "Last claimed" rather than "now processing" -- this same block
+        // renders for 'running', 'pausing', AND 'paused' (Session 64's
+        // frozen-snapshot precedent), and by the time a pause finishes
+        // draining, the item this names has already finished (or is the one
+        // that was in flight when pause was requested), not something still
+        // actively running.
+        const lines: string[] = [];
+        if (p.currentFunctionName) {
+            lines.push(`Last claimed: ${p.currentFunctionName}`);
+        }
+        lines.push(breakdown);
         if (p.etaMs !== undefined) {
             lines.push(`~${formatDuration(p.etaMs)} remaining`);
         }
@@ -325,7 +356,21 @@ export class BackgroundIndexManager implements vscode.Disposable {
                 this.statusBarItem.show();
                 break;
             case 'idle':
-                this.statusBarItem.hide();
+                // Session 72: show repo-wide coverage from the last fully
+                // completed pass, if any, instead of always hiding -- still
+                // hidden with nothing to say if no pass has ever completed
+                // (untrusted workspace, first activation before a pass
+                // finishes, etc).
+                if (this.lastCoverage) {
+                    const { covered, total } = this.lastCoverage;
+                    const pct = total > 0 ? Math.round((covered / total) * 100) : 0;
+                    this.statusBarItem.text = `$(check) LucidHover: ${covered}/${total} explained`;
+                    this.statusBarItem.tooltip = `Background indexing coverage (${covered}/${total}, ${pct}%) as of the last completed pass, against the configured background-index scope.`;
+                    this.statusBarItem.backgroundColor = undefined;
+                    this.statusBarItem.show();
+                } else {
+                    this.statusBarItem.hide();
+                }
                 break;
         }
     }
@@ -427,7 +472,15 @@ export class BackgroundIndexManager implements vscode.Disposable {
         let skipped = 0;
         let unresolved = 0;
         let failed = 0;
-        this.progress = { total: ranked.length, generated, skipped, unresolved, failed, etaMs: undefined };
+        this.progress = {
+            total: ranked.length,
+            generated,
+            skipped,
+            unresolved,
+            failed,
+            etaMs: undefined,
+            currentFunctionName: undefined,
+        };
         this.generationCompletionTimestamps = [Date.now()];
         this.updateStatusBar();
 
@@ -494,6 +547,15 @@ export class BackgroundIndexManager implements vscode.Disposable {
                 // leave this worker parked for an extended, unbounded
                 // stretch, during which pausing would silently have no
                 // effect (found by code-reviewer during session 32).
+                //
+                // Session 72: set as soon as this entry is claimed for
+                // generation (not just once generateAndCache actually
+                // starts) so the tooltip's "Last claimed" line reflects
+                // what a worker is about to work on through the idle-wait
+                // too, not only the generation call itself -- "most
+                // recently claimed", matching the field's own doc comment.
+                this.progress!.currentFunctionName = `${entry.rel_fname}: ${resolved.name}`;
+                this.updateStatusBar();
                 await sidecar.waitForInteractiveIdle(token);
                 if (token.isCancellationRequested) {
                     return;
@@ -522,6 +584,9 @@ export class BackgroundIndexManager implements vscode.Disposable {
         await Promise.all(Array.from({ length: workerCount }, () => worker()));
 
         const status = token.isCancellationRequested ? (this.getPhase() === 'pausing' ? 'paused' : 'canceled') : 'done';
+        if (status === 'done') {
+            this.lastCoverage = { covered: generated + skipped, total: ranked.length };
+        }
         let summary = `${generated} generated, ${skipped} already cached, ${unresolved} unresolved`;
         if (failed > 0) {
             summary += `, ${failed} failed`;
