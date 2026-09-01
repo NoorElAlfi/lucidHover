@@ -14,3 +14,15 @@ reference/
 # Runtime lock file (session id/pid/timestamp) -- churns on every run, not
 # meant to be version-controlled.
 .claude/scheduled_tasks.lock
+
+# Internal AI-workflow docs (spec/planning drafts, session briefs, the
+# Core-Rules-and-session-log file, and every session artifact under
+# .claude/) -- kept locally, not part of this repo's public history.
+# README.md, fixtures/REQUIREMENTS.md, and the fixtures/javascript summary-doc
+# fixtures under docs/wiki/ are exempted: they're needed to set up or run
+# this project, not just to continue an AI session.
+*.md
+!README.md
+!fixtures/REQUIREMENTS.md
+!fixtures/javascript/docs/wiki/**
+.claude/
