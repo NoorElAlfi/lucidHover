@@ -7,6 +7,10 @@
   "author": "NoorElAlfi",
   "license": "Apache-2.0",
   "icon": "media/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/NoorElAlfi/lucidHover.git"
+  },
   "private": true,
   "engines": {
     "vscode": "^1.90.0"
