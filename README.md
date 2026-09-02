@@ -16,6 +16,29 @@ providers, no telemetry. Everything runs on your machine.
 - A trusted VS Code workspace — LucidHover only indexes and generates explanations in workspaces
   you've granted [Workspace Trust](https://code.visualstudio.com/docs/editor/workspace-trust) to.
 
+LucidHover does not install or manage Ollama for you — it only talks to whatever Ollama is
+already running locally. Setup is a one-time, five-minute process:
+
+## Setup
+
+1. **Install Ollama** from [ollama.com](https://ollama.com) (macOS, Windows, or Linux) and make
+   sure it's running — on most platforms it starts automatically and stays running in the
+   background after install; if not, launch it manually before continuing.
+2. **Pull the two models LucidHover uses by default:**
+   ```bash
+   ollama pull qwen2.5-coder:1.5b
+   ollama pull all-minilm
+   ```
+   The first (`qwen2.5-coder:1.5b`) generates explanations; the second (`all-minilm`) powers local
+   embeddings/retrieval. Both are small (under 1 GB combined) and only need to be pulled once. If
+   you'd rather use a different generation model, see `lucidHover.modelId` in Settings below — pull
+   that model instead and set the setting to match.
+3. **Install the LucidHover extension** in VS Code (Marketplace or a local `.vsix`).
+4. **Open a workspace and trust it** when prompted — LucidHover only indexes and generates in
+   trusted workspaces (see Requirements above).
+5. That's it. LucidHover spawns its local sidecar process automatically on activation — no further
+   configuration is needed to start hovering.
+
 On first activation in a trusted workspace, LucidHover spawns a local sidecar process that parses
 your codebase, ranks functions by importance (call-graph PageRank), and begins generating
 explanations in the background. Hovering over an already-indexed function is instant — it's a
