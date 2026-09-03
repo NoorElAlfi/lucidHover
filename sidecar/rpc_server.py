@@ -147,6 +147,20 @@ important. Whether Ollama itself can usefully run two generations
 concurrently, rather than queueing the second behind the first internally,
 is outside this module's control and was live-measured for this session's
 artifact rather than assumed.
+
+Idle poll backoff (Session 75): `_serve_windows`/`_serve_posix`'s poll loop
+above wakes up at `_POLL_INTERVAL_S` (50 Hz) even when the sidecar is
+completely idle, which is most of its real process lifetime -- a live
+idle-CPU measurement (this session's artifact) confirmed that fixed 50 Hz
+wakeup, not any one request, is the dominant real cost of a quiet sidecar.
+`_ActivityTracker` now tracks how much dispatch work is in flight and how
+recently any was (including responses still sitting in `out_queue`,
+unread), and `_poll_interval()` uses that to fall back to a much slower
+`_IDLE_POLL_INTERVAL_S` (4 Hz) once the connection has been quiet for
+`_IDLE_GRACE_S`. This changes only the sleep/timeout value passed to
+`time.sleep`/`conn.settimeout` each iteration -- it does not change which
+thread touches the pipe/socket, how responses are dispatched to workers,
+or anything else about the design above.
 """
 
 from __future__ import annotations
@@ -472,11 +486,95 @@ _MAX_WORKERS = 8
 # is no longer synchronous: worst case ~this many ms, a rounding error next
 # to the multi-second Ollama calls this whole session is about, and utterly
 # negligible next to session 36's own +2,742ms measurement of the bug this
-# fixes.
+# fixes. Session 75: this fast interval is now used only while genuinely
+# busy or recently busy (see `_ActivityTracker`/`_poll_interval` below) --
+# a fully idle connection, the vast majority of this loop's real lifetime,
+# polls at `_IDLE_POLL_INTERVAL_S` instead.
 _POLL_INTERVAL_S = 0.02
 
+# Session 75 (queue-aware adaptive poll backoff): the poll interval used
+# once the connection has been idle (no in-flight dispatch, no queued
+# response) for at least `_IDLE_GRACE_S`. A live idle-CPU measurement
+# (this session's own artifact) confirmed the 50 Hz `_POLL_INTERVAL_S`
+# wakeup, harmless per-iteration, is the dominant real cost of an otherwise
+# fully idle sidecar -- most of its process lifetime, since interactive use
+# is bursty. 4 Hz still notices a newly-arrived request within a bound well
+# under session 36's own <1s added-latency bar, while cutting wakeup
+# frequency (and the Task Manager-visible background power draw that
+# prompted this session) by over an order of magnitude.
+_IDLE_POLL_INTERVAL_S = 0.25
 
-def _dispatch_worker(repo_map: RepoMap, message: dict[str, Any], out_queue: "queue.Queue[Any]") -> None:
+# How long to keep polling at the fast `_POLL_INTERVAL_S` after the last
+# sign of activity (a dispatch submitted, a worker completing, or a
+# response drained) before switching to `_IDLE_POLL_INTERVAL_S`. Long
+# enough that a single request followed a moment later by a related
+# follow-up (e.g. a hover then an immediate panel click) doesn't pay the
+# idle-to-fast transition latency twice in a row; short enough that a
+# genuinely idle sidecar reaches the cheap interval quickly rather than
+# staying needlessly fast for a long tail after the last request.
+_IDLE_GRACE_S = 2.0
+
+
+class _ActivityTracker:
+    """Session 75: tracks how much RPC work is in flight and how recently
+    any was, so the poll loop below can back off to a slow idle interval
+    instead of spinning at `_POLL_INTERVAL_S` forever. Written from two
+    different threads -- `_process_lines` (the I/O thread, on submit) and
+    `_dispatch_worker` (a worker thread, on completion) -- and read by the
+    I/O thread's own loop, so all access goes through a plain lock rather
+    than relying on GIL-timing assumptions about int increments.
+
+    `in_flight` alone is not enough: a worker can finish (decrementing to
+    0) at the exact moment its response is still sitting in `out_queue`,
+    unread by the I/O thread. `last_active_monotonic` covers that gap too
+    -- `mark_drained()` refreshes it whenever the I/O thread actually pulls
+    a finished response off the queue, not just when work starts/stops.
+    """
+
+    def __init__(self, clock=time.monotonic) -> None:
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._in_flight = 0
+        self._last_active = clock()
+
+    def mark_submitted(self) -> None:
+        with self._lock:
+            self._in_flight += 1
+            self._last_active = self._clock()
+
+    def mark_completed(self) -> None:
+        with self._lock:
+            self._in_flight -= 1
+            self._last_active = self._clock()
+
+    def mark_drained(self) -> None:
+        with self._lock:
+            self._last_active = self._clock()
+
+    def snapshot(self) -> tuple[int, float]:
+        """Returns (in_flight, seconds_since_last_active) as of now."""
+        with self._lock:
+            in_flight = self._in_flight
+            last_active = self._last_active
+        return in_flight, self._clock() - last_active
+
+
+def _poll_interval(in_flight: int, out_queue_empty: bool, seconds_since_active: float) -> float:
+    """Pure decision function (Session 75), kept separate from the
+    activity-tracking/threading machinery above so it's directly unit-
+    testable without spawning a real sidecar or any threads. Fast whenever
+    there's work to notice (something dispatched, something queued to
+    send) or work ended too recently to be confident nothing else is about
+    to arrive; slow only once the connection has been genuinely quiet for
+    `_IDLE_GRACE_S`."""
+    if in_flight > 0 or not out_queue_empty or seconds_since_active < _IDLE_GRACE_S:
+        return _POLL_INTERVAL_S
+    return _IDLE_POLL_INTERVAL_S
+
+
+def _dispatch_worker(
+    repo_map: RepoMap, message: dict[str, Any], out_queue: "queue.Queue[Any]", activity: _ActivityTracker
+) -> None:
     # Deliberately does not touch the pipe/socket at all -- only the single
     # I/O thread in `_serve_windows`/`_serve_posix` does. See those
     # functions' own comments for why: a live repro against a real spawned
@@ -488,11 +586,19 @@ def _dispatch_worker(repo_map: RepoMap, message: dict[str, Any], out_queue: "que
     # separately confirmed broken the same way, but the same single-I/O-
     # thread design sidesteps the question for both transports at once
     # rather than trusting an unconfirmed asymmetry between them.
-    response = _dispatch(repo_map, message)
-    out_queue.put(json.dumps(response))
+    try:
+        response = _dispatch(repo_map, message)
+        out_queue.put(json.dumps(response))
+    finally:
+        # In the `finally`, not right after `put` -- a `_dispatch` that
+        # somehow raised past its own try/except (it shouldn't; see
+        # `_dispatch`'s comment) must still release the in-flight count, or
+        # the poll loop could get stuck believing work is permanently
+        # in flight and never back off to the idle interval.
+        activity.mark_completed()
 
 
-def _drain_outgoing(send_line, out_queue: "queue.Queue[Any]") -> None:
+def _drain_outgoing(send_line, out_queue: "queue.Queue[Any]", activity: _ActivityTracker) -> None:
     """Writes every response currently sitting in the queue, in the order
     workers finished them -- not necessarily request order; see the module
     docstring's "Dispatch concurrency" section on why that's already fine."""
@@ -501,6 +607,7 @@ def _drain_outgoing(send_line, out_queue: "queue.Queue[Any]") -> None:
             item = out_queue.get_nowait()
         except queue.Empty:
             return
+        activity.mark_drained()
         try:
             send_line(item)
         except Exception as exc:
@@ -516,6 +623,7 @@ def _process_lines(
     repo_map: RepoMap,
     out_queue: "queue.Queue[Any]",
     executor: concurrent.futures.ThreadPoolExecutor,
+    activity: _ActivityTracker,
 ) -> bytes:
     while b"\n" in buf:
         line, buf = buf.split(b"\n", 1)
@@ -529,8 +637,12 @@ def _process_lines(
         # Session 37: submit and keep reading, rather than calling
         # `_dispatch` inline here -- see the module docstring's "Dispatch
         # concurrency" section for why this is the actual fix, not just a
-        # refactor.
-        executor.submit(_dispatch_worker, repo_map, message, out_queue)
+        # refactor. Session 75: `mark_submitted()` before `submit()`, not
+        # after -- a request that's about to run must count as "in flight"
+        # with no gap where the poll loop could see 0 in-flight and 0
+        # queued and wrongly decide to go idle between the two calls.
+        activity.mark_submitted()
+        executor.submit(_dispatch_worker, repo_map, message, out_queue, activity)
     return buf
 
 
@@ -561,6 +673,7 @@ def _serve_windows(address: str, repo_map: RepoMap) -> None:
             win32file.WriteFile(_pipe, text.encode("utf-8") + b"\n")
 
         out_queue: "queue.Queue[Any]" = queue.Queue()
+        activity = _ActivityTracker()
 
         buf = b""
         try:
@@ -576,19 +689,24 @@ def _serve_windows(address: str, repo_map: RepoMap) -> None:
                 # on `pipe` -- see `_dispatch_worker`'s comment for why that
                 # matters (not just tidiness): a worker thread writing
                 # concurrently with this thread's read deadlocks the pipe.
-                _drain_outgoing(send_line, out_queue)
+                _drain_outgoing(send_line, out_queue, activity)
                 _, bytes_avail, _ = win32pipe.PeekNamedPipe(pipe, 0)
                 if bytes_avail == 0:
-                    time.sleep(_POLL_INTERVAL_S)
+                    # Session 75: sleep at the fast interval while there's
+                    # work to notice (or work ended too recently to be
+                    # sure), the slow idle interval otherwise -- see
+                    # `_poll_interval`'s own comment.
+                    in_flight, seconds_since_active = activity.snapshot()
+                    time.sleep(_poll_interval(in_flight, out_queue.empty(), seconds_since_active))
                     continue
                 hr, data = win32file.ReadFile(pipe, 65536)
                 if not data:
                     break
-                buf = _process_lines(buf + data, repo_map, out_queue, executor)
+                buf = _process_lines(buf + data, repo_map, out_queue, executor, activity)
         except pywintypes.error as exc:
             _log(f"client disconnected ({exc.strerror})")
         finally:
-            _drain_outgoing(send_line, out_queue)
+            _drain_outgoing(send_line, out_queue, activity)
             win32file.CloseHandle(pipe)
 
 
@@ -610,6 +728,9 @@ def _serve_posix(address: str, repo_map: RepoMap) -> None:
             # through to drain outgoing responses and re-check even when no
             # new request has arrived yet -- same role `PeekNamedPipe` plays
             # in `_serve_windows` above, POSIX's more natural equivalent.
+            # Session 75: the actual timeout value is now recomputed each
+            # iteration below rather than set once here -- see
+            # `_poll_interval`'s own comment.
             conn.settimeout(_POLL_INTERVAL_S)
 
             # Same reasoning as `_serve_windows`'s own `send_line` -- see its
@@ -618,20 +739,23 @@ def _serve_posix(address: str, repo_map: RepoMap) -> None:
                 _conn.sendall(text.encode("utf-8") + b"\n")
 
             out_queue: "queue.Queue[Any]" = queue.Queue()
+            activity = _ActivityTracker()
 
             buf = b""
             try:
                 while True:
-                    _drain_outgoing(send_line, out_queue)
+                    _drain_outgoing(send_line, out_queue, activity)
+                    in_flight, seconds_since_active = activity.snapshot()
+                    conn.settimeout(_poll_interval(in_flight, out_queue.empty(), seconds_since_active))
                     try:
                         data = conn.recv(65536)
                     except socket.timeout:
                         continue
                     if not data:
                         break
-                    buf = _process_lines(buf + data, repo_map, out_queue, executor)
+                    buf = _process_lines(buf + data, repo_map, out_queue, executor, activity)
             finally:
-                _drain_outgoing(send_line, out_queue)
+                _drain_outgoing(send_line, out_queue, activity)
                 conn.close()
                 _log("client disconnected")
     finally:
