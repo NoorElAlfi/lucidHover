@@ -13,6 +13,11 @@ Session 49 added `audit.ts`'s `auditWrite` (a top-level arrow-const) between
 `AuditLogger.record` (a class method) and `logEvent` (a free function),
 bumping the count from 25 to 26 -- see the graph-view tests near the bottom
 of this file for why (blast radius / call trace cross-language validation).
+
+Session 78 added `dashboard.tsx`'s `UserBadge`/`Menu` (two new function
+components exercising the new jsx_opening_element/jsx_self_closing_element
+reference capture), bumping the count from 26 to 28 -- see the JSX-specific
+tests near the bottom of this file.
 """
 
 from __future__ import annotations
@@ -36,7 +41,7 @@ def repo_map():
 
 
 def test_indexes_all_functions(repo_map):
-    assert len(repo_map.list_functions()) == 26
+    assert len(repo_map.list_functions()) == 28
 
 
 def test_most_called_function_ranks_highest(repo_map):
@@ -162,3 +167,39 @@ def test_blast_radius_from_arrow_const_shows_class_method_caller(repo_map):
     blast = repo_map.get_blast_radius(*audit_write)
     assert [(n.rel_fname, n.name, n.depth) for n in blast.nodes] == [("audit.ts", "record", 1)]
     assert blast.omissions == []
+
+
+# Session 78: real-fixture confirmation of the new JSX reference capture
+# (session 77's blind-spot audit, closed this session), against the corpus's
+# one real .tsx file rather than only synthetic snippets.
+
+
+def test_jsx_component_usage_is_a_captured_caller(repo_map):
+    """`<UserBadge />`, used 3x inside `Dashboard`, must now produce a real
+    caller edge -- before this session it would have been invisible (session
+    77's confirmed finding: captured callers stayed at 0 regardless of real
+    JSX usage count)."""
+    user_badge = next(n for n in repo_map.list_functions() if n[1] == "UserBadge")
+    ctx = repo_map.get_function_context(*user_badge)
+    assert {(c.rel_fname, c.name) for c in ctx.callers} == {("dashboard.tsx", "Dashboard")}
+
+
+def test_jsx_namespaced_usage_resolves_to_root_identifier(repo_map):
+    """`<Menu.Item />` resolves to `Menu` (the root/object identifier of the
+    member expression), not `Item` -- this session's documented decision."""
+    menu = next(n for n in repo_map.list_functions() if n[1] == "Menu")
+    ctx = repo_map.get_function_context(*menu)
+    assert {(c.rel_fname, c.name) for c in ctx.callers} == {("dashboard.tsx", "Dashboard")}
+
+
+def test_jsx_lowercase_host_element_produces_no_reference_tag(repo_map):
+    """`<div>` (a lowercase host element) must not become a reference Tag at
+    all -- checked at the extraction level, not just absence from the graph,
+    since a wrongly-captured `div` reference could still silently resolve to
+    nothing (no function named `div` exists) and this test would pass for
+    the wrong reason if it only checked the graph."""
+    dashboard_tags = repo_map.tags_by_file["dashboard.tsx"]
+    ref_names = {t.name for t in dashboard_tags if t.kind == "ref"}
+    assert "div" not in ref_names
+    assert "span" not in ref_names  # UserBadge's own host element, same check
+    assert "nav" not in ref_names  # Menu's own host element, same check

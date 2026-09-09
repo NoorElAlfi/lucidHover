@@ -30,9 +30,20 @@
 ;
 ; Same predicate caveat as javascript_tags.scm: `#not-eq?`/`#not-match?`
 ; predicates are not evaluated by this project's tree-sitter binding version
-; via QueryCursor.matches() -- no predicates here either; extraction.py's
-; manifest-driven def/ref-name exclusion filters "constructor" defs in
-; Python instead.
+; via QueryCursor.matches() -- no predicates here either; the tree-sitter
+; adapter's manifest-driven def/ref-name exclusion filters "constructor" defs
+; in Python instead (see adapters/tree_sitter.py).
+;
+; Session 78: this file has no `@reference.jsx` patterns (compare
+; javascript_tags.scm and typescript_tsx_tags.scm), and must not gain any --
+; confirmed empirically that `Query()` construction throws
+; "Invalid node type: jsx_opening_element" against `language_typescript()`
+; (this file's grammar, used by the plain `typescript` manifest entry for
+; `.ts`), since that grammar has no JSX node types at all (only
+; `language_tsx()` does). `typescriptreact` (`.tsx`) is therefore a *separate*
+; manifest entry pointing at `typescript_tsx_tags.scm` instead of this file,
+; even though its non-JSX patterns are otherwise identical to this file's --
+; seeing double here is the fix, not a bug to dedupe away.
 
 (function_declaration
   name: (identifier) @name.definition.function) @definition.function

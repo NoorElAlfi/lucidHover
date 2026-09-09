@@ -11,13 +11,15 @@
     "exclusions": {
       "dirs": ["node_modules", "out", "dist", "build"],
       "defNames": ["constructor"],
-      "refNames": ["require"]
+      "refNames": ["require"],
+      "caseSensitiveRefKinds": ["reference.jsx"]
     },
     "resolutionStrategy": "tree-sitter-only",
     "captureKindMap": {
       "definition.function": "function",
       "definition.method": "function",
-      "reference.call": "call"
+      "reference.call": "call",
+      "reference.jsx": "jsx"
     }
   },
   "typescript": {
@@ -49,17 +51,19 @@
       "grammarPackage": "tree_sitter_typescript",
       "grammarFunction": "language_tsx"
     },
-    "tagQueryFile": "typescript_tags.scm",
+    "tagQueryFile": "typescript_tsx_tags.scm",
     "exclusions": {
       "dirs": ["node_modules", "out", "dist", "build"],
       "defNames": ["constructor"],
-      "refNames": []
+      "refNames": [],
+      "caseSensitiveRefKinds": ["reference.jsx"]
     },
     "resolutionStrategy": "tree-sitter-only",
     "captureKindMap": {
       "definition.function": "function",
       "definition.method": "function",
-      "reference.call": "call"
+      "reference.call": "call",
+      "reference.jsx": "jsx"
     }
   }
 }

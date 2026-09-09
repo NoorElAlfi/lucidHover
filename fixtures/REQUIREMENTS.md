@@ -102,9 +102,11 @@ one language at a time.
 package's `language_tsx()` grammar, while a plain `.ts` file needs `language_typescript()` (using
 `language_typescript()` on JSX source silently drops call references inside the JSX, confirmed
 directly before splitting the entry — see `sidecar/repomap/queries/typescript_tags.scm`'s header
-and the session-24 artifact). Both entries share one `fixtures/typescript/` directory and one
-`typescript_tags.scm` query file. For the purposes of this cap, that is **one** language, not two
-— count fixture *directories*, not `languages.json` entries, when weighing the cap.
+and the session-24 artifact). Both entries share one `fixtures/typescript/` directory. (Session 78:
+they no longer share one query file — `typescriptreact` moved to its own
+`typescript_tsx_tags.scm`, since `language_typescript()` can't even compile a query containing JSX
+node types; see that file's header.) For the purposes of this cap, that is **one** language, not
+two — count fixture *directories*, not `languages.json` entries, when weighing the cap.
 
 ## JavaScript fixture: checked against this list (Session 23)
 
@@ -132,7 +134,7 @@ so ranked call-graph output is identical before and after the move.
 ## TypeScript fixture: checked against this list (Session 24)
 
 `fixtures/typescript/repomap/` — 8 files (`models.ts`, `logging.ts`, `utils.ts`, `db.ts`,
-`email.ts`, `audit.ts`, `handlers.ts`, `dashboard.tsx`), 26 functions total, confirmed via
+`email.ts`, `audit.ts`, `handlers.ts`, `dashboard.tsx`), 28 functions total, confirmed via
 `python -m sidecar.repomap.cli fixtures/typescript/repomap` and checked into
 `sidecar/tests/test_repomap_typescript.py`.
 
@@ -172,3 +174,12 @@ so ranked call-graph output is identical before and after the move.
   `record` no longer calls `logEvent` directly (it now calls `auditWrite`, which does), so
   `logEvent`'s total caller count is unchanged at 21 — only the function count moved, from 25 to
   26.
+- **Session 78 addition:** `dashboard.tsx` gained two new function components, `UserBadge` (used
+  3x as `<UserBadge />` inside `Dashboard`) and `Menu` (used once as the namespaced `<Menu.Item />`
+  — resolves to `Menu`, its member expression's root identifier, not `Item`; see
+  `adapters/tree_sitter.py`'s `_case_filtered_name_node` for why), added to give the new
+  `jsx_opening_element`/`jsx_self_closing_element` reference-capture feature (closing session 77's
+  confirmed blind-spot finding) a real fixture case for both a plain capitalized component tag and
+  a namespaced one, alongside the file's pre-existing lowercase `<div>` host element (confirmed to
+  still produce no reference at all). Function count moved from 26 to 28; `logEvent`'s caller count
+  is unchanged at 21 (neither new component calls it).

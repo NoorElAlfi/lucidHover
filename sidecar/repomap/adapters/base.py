@@ -41,6 +41,13 @@ class Exclusions:
     dirs: frozenset[str] = field(default_factory=frozenset)
     def_names: frozenset[str] = field(default_factory=frozenset)
     ref_names: frozenset[str] = field(default_factory=frozenset)
+    # Session 78: capture categories (e.g. "reference.jsx") whose captured
+    # name needs a structural case check rather than a literal name-list
+    # exclusion -- see tree_sitter.py's extract_tags for what the check does.
+    # Declared per-language here (both languages that register JSX patterns
+    # list "reference.jsx") rather than hardcoded in the adapter, matching
+    # def_names/ref_names' own manifest-driven-not-hardcoded precedent.
+    case_sensitive_ref_kinds: frozenset[str] = field(default_factory=frozenset)
 
 
 @dataclass(frozen=True)
@@ -73,6 +80,7 @@ class LanguageManifestEntry:
                 dirs=frozenset(excl.get("dirs", [])),
                 def_names=frozenset(excl.get("defNames", [])),
                 ref_names=frozenset(excl.get("refNames", [])),
+                case_sensitive_ref_kinds=frozenset(excl.get("caseSensitiveRefKinds", [])),
             ),
             resolution_strategy=data["resolutionStrategy"],
             capture_kind_map=dict(data.get("captureKindMap", {})),
