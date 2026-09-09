@@ -263,12 +263,24 @@ def update_call_graph_for_file(
     # itself; this pass corrects confidence on every *other* existing edge
     # for every name whose candidate set just changed, found the same way
     # (`refs_by_name`) rather than rescanning the repo.
+    #
+    # Session 79: skip `rel_fname`'s own refs here -- the first loop above
+    # already computed their confidence against the fully-updated
+    # `defs_by_name` (every mutation to it happens before that loop runs),
+    # so re-deriving the same answer for them a second time was pure
+    # redundant work, flagged but not fixed as a "minor, non-asymptotic
+    # inefficiency" by session 44's code-reviewer pass. Safe to skip: this
+    # mirrors the second loop's own `ref.rel_fname == rel_fname: continue`
+    # guard, and every test asserting incremental-vs-full-rebuild equality
+    # (`_assert_matches_full_rebuild`) still passes with it in place.
     affected_names = {d.name for d in old_defs} | new_def_names
     for name in affected_names:
         callees = defs_by_name.get(name, [])
         if not callees:
             continue
         for ref in refs_by_name.get(name, []):
+            if ref.rel_fname == rel_fname:
+                continue
             caller_def = _enclosing_def(ref, defs_by_file)
             if caller_def is None:
                 continue

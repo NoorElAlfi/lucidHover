@@ -106,6 +106,19 @@ def scratch_repo_map(tmp_path):
     return rm, scratch_root
 
 
+def _assert_matches_full_rebuild(rm):
+    """Mirrors test_repomap.py's helper of the same name: `reindex_file`'s
+    incremental graph update must always match a full `build_call_graph`
+    rescan -- same nodes, same edges, same (weight, confident) per edge."""
+    fresh = build_call_graph(rm.tags_by_file)
+    assert set(rm.graph.nodes) == set(fresh.nodes)
+    actual_edges = {
+        (u, v): (rm.graph[u][v]["weight"], rm.graph[u][v]["confident"]) for u, v in rm.graph.edges
+    }
+    fresh_edges = {(u, v): (fresh[u][v]["weight"], fresh[u][v]["confident"]) for u, v in fresh.edges}
+    assert actual_edges == fresh_edges
+
+
 def test_reindex_file_leaves_line_shifted_functions_call_graph_intact(scratch_repo_map):
     """
     REQUIREMENTS.md structural requirement 4: editing inside
@@ -203,3 +216,80 @@ def test_jsx_lowercase_host_element_produces_no_reference_tag(repo_map):
     assert "div" not in ref_names
     assert "span" not in ref_names  # UserBadge's own host element, same check
     assert "nav" not in ref_names  # Menu's own host element, same check
+
+
+# Session 79: session 44's ambiguous-name `confident` filter was built and
+# tested only against call_expression-sourced refs. It's computed purely off
+# `Tag.name`/`Tag.rel_fname` (see `_confident_callee_ids`), with no branching
+# on `capture_kind` anywhere in graph.py, so it should generalize to
+# JSX-sourced refs (session 78) with no code changes -- these tests confirm
+# that generalization actually holds, mirroring session 44's own two
+# duplicate-name scenarios (`test_reindex_file_new_file_with_duplicate_name_
+# in_other_file_drops_from_context` / `..._in_callers_own_file_is_preferred`
+# in test_repomap.py) but with a `<Component />`-sourced ambiguous edge
+# instead of a call-expression-sourced one.
+
+
+def test_jsx_sourced_ambiguous_caller_with_no_same_file_definition_is_unconfident(
+    scratch_repo_map,
+):
+    """A JSX-sourced reference to an ambiguous name (defined in two files,
+    neither of which is the caller's own file) must be suppressed from
+    `get_function_context` the same way an ambiguous call-expression-sourced
+    reference already is -- while the raw graph edges (for PageRank, Core
+    Rule 3) still exist for both candidates."""
+    rm, scratch_root = scratch_repo_map
+
+    (scratch_root / "widget_user.tsx").write_text(
+        "export function WidgetUser(): JSX.Element {\n  return <Shared />;\n}\n",
+        encoding="utf-8",
+    )
+    rm.reindex_file("widget_user.tsx")
+
+    (scratch_root / "widgets_a.tsx").write_text(
+        "export function Shared(): JSX.Element {\n  return <div>A</div>;\n}\n",
+        encoding="utf-8",
+    )
+    rm.reindex_file("widgets_a.tsx")
+
+    widget_user = next(n for n in rm.list_functions() if n[1] == "WidgetUser")
+    before = {(c.rel_fname, c.name) for c in rm.get_function_context(*widget_user).callees}
+    assert ("widgets_a.tsx", "Shared") in before  # unambiguous so far -- confident
+
+    (scratch_root / "widgets_b.tsx").write_text(
+        "export function Shared(): JSX.Element {\n  return <div>B</div>;\n}\n",
+        encoding="utf-8",
+    )
+    rm.reindex_file("widgets_b.tsx")
+
+    after = {(c.rel_fname, c.name) for c in rm.get_function_context(*widget_user).callees}
+    assert not any(name == "Shared" for _, name in after)
+
+    graph_callees = {n[:2] for n in rm.graph.successors(widget_user)}
+    assert ("widgets_a.tsx", "Shared") in graph_callees
+    assert ("widgets_b.tsx", "Shared") in graph_callees
+    _assert_matches_full_rebuild(rm)
+
+
+def test_jsx_sourced_ambiguous_caller_prefers_same_file_definition(scratch_repo_map):
+    """Same ambiguous-name scenario as above, except the duplicate definition
+    lands in a file unrelated to either candidate, and the caller
+    (`Dashboard`) shares a file with one of the two `UserBadge` definitions
+    (`dashboard.tsx` itself) -- the same-file candidate must stay the
+    confident one, dropping the unrelated duplicate."""
+    rm, scratch_root = scratch_repo_map
+
+    dashboard = next(n for n in rm.list_functions() if n[1] == "Dashboard")
+    before = {(c.rel_fname, c.name) for c in rm.get_function_context(*dashboard).callees}
+    assert ("dashboard.tsx", "UserBadge") in before
+
+    (scratch_root / "other_badge.tsx").write_text(
+        "export function UserBadge(): JSX.Element {\n  return <div>other</div>;\n}\n",
+        encoding="utf-8",
+    )
+    rm.reindex_file("other_badge.tsx")
+
+    after = {(c.rel_fname, c.name) for c in rm.get_function_context(*dashboard).callees}
+    assert ("dashboard.tsx", "UserBadge") in after
+    assert ("other_badge.tsx", "UserBadge") not in after
+    _assert_matches_full_rebuild(rm)
