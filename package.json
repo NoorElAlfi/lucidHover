@@ -39,7 +39,8 @@
   "activationEvents": [
     "onLanguage:javascript",
     "onLanguage:typescript",
-    "onLanguage:typescriptreact"
+    "onLanguage:typescriptreact",
+    "onLanguage:python"
   ],
   "main": "./out/extension/extension.js",
   "contributes": {
@@ -124,14 +125,14 @@
       "editor/context": [
         {
           "command": "lucidhover.prioritizeFileIndexing",
-          "when": "resourceLangId == javascript || resourceLangId == typescript || resourceLangId == typescriptreact",
+          "when": "resourceLangId == javascript || resourceLangId == typescript || resourceLangId == typescriptreact || resourceLangId == python",
           "group": "lucidhover"
         }
       ],
       "commandPalette": [
         {
           "command": "lucidhover.prioritizeFileIndexing",
-          "when": "resourceLangId == javascript || resourceLangId == typescript || resourceLangId == typescriptreact"
+          "when": "resourceLangId == javascript || resourceLangId == typescript || resourceLangId == typescriptreact || resourceLangId == python"
         }
       ]
     },

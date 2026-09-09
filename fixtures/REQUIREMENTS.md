@@ -28,15 +28,23 @@ fixtures/<language-id>/            -- <language-id> matches a key in the repo-ro
 not part of this contract.
 
 A fixture directory may also contain files in a language deliberately **not** in `languages.json`
-(e.g. `fixtures/javascript/sample.py`, and — since session 24 made `languageGating.test.ts` run
-against whichever fixture workspace `LUCIDHOVER_FIXTURE_LANGUAGE` selects — `fixtures/typescript/sample.py`
-too), used only to prove that unsupported-language files get excluded (session 22's
-`languageGating.test.ts`). That is a property of the exclusion test, not a second language fixture —
-do not read a stray non-adapter file in a fixture directory as the start of that language's own
-fixture. Convention as of session 24: every fixture directory carries its own `sample.py` probe
+(e.g. `fixtures/javascript/sample.rb`, and — since session 24 made `languageGating.test.ts` run
+against whichever fixture workspace `LUCIDHOVER_FIXTURE_LANGUAGE` selects — `fixtures/typescript/sample.rb`
+and `fixtures/python/sample.rb` too), used only to prove that unsupported-language files get excluded
+(session 22's `languageGating.test.ts`). That is a property of the exclusion test, not a second
+language fixture — do not read a stray non-adapter file in a fixture directory as the start of that
+language's own fixture. Convention as of session 24: every fixture directory carries its own probe
 file (same content, copied not shared) rather than one fixture's probe being reused across
 languages — `@vscode/test-electron` only has one workspace root open at a time, so the probe file
 needs to exist in whichever fixture is currently the workspace.
+
+**Session 91: the probe language changed from Python to Ruby (`sample.rb`).** Python was the
+probe's original "no adapter" language (session 22); once session 91 gave Python a real adapter, it
+could no longer serve as the still-unsupported example, so every fixture's `sample.py` was renamed
+to `sample.rb` (Ruby — still absent from `languages.json`, and VS Code assigns it the built-in
+`ruby` language id with no extension installed, the same "no IntelliSense extension needed for a
+language id" property `sample.py` relied on before). A future language session should re-check
+whether its own new language is the one taking over the probe role, mirroring this precedent.
 
 ## Tier 1: automated, runs on every change
 
@@ -95,7 +103,8 @@ Derived from what `fixtures/javascript/repomap` already relies on (confirmed dir
 At most **four** supported languages before fixture maintenance is revisited as its own decision
 — more than that and per-language fixture upkeep (structural requirements above, times N
 languages) becomes its own cost worth deciding about explicitly, not something to keep absorbing
-one language at a time.
+one language at a time. Session 91's Python fixture brings the count to **three** (JavaScript,
+TypeScript, Python) — one below the cap.
 
 **Counting note (session 24):** TypeScript registers as *two* `languages.json` entries
 (`typescript` for `.ts`, `typescriptreact` for `.tsx`) — real JSX needs the `tree-sitter-typescript`
@@ -183,3 +192,54 @@ so ranked call-graph output is identical before and after the move.
   a namespaced one, alongside the file's pre-existing lowercase `<div>` host element (confirmed to
   still produce no reference at all). Function count moved from 26 to 28; `logEvent`'s caller count
   is unchanged at 21 (neither new component calls it).
+
+## Python fixture: checked against this list (Session 91)
+
+`fixtures/python/repomap/` — 6 files (`logging.py`, `utils.py`, `db.py`, `email.py`, `handlers.py`,
+`audit.py`), 25 functions total, confirmed via `python -m sidecar.repomap.cli fixtures/python/repomap`
+and checked into `sidecar/tests/test_repomap_python.py`.
+
+- Cross-file chains (requirement 1): confirmed — `db.py:insert_user` → `utils.py:validate_email`;
+  `email.py:send_welcome_email` → `utils.py:format_date`; `handlers.py:validate_and_persist_signup`
+  → functions in `utils.py`, `db.py`, and `email.py` simultaneously.
+- Zero-callers/callees case (requirement 2): confirmed — `is_empty` in `utils.py`.
+- \>15-caller case (requirement 3): confirmed — `log_event` in `logging.py`, **18** total callers
+  across 6 files (17 mirroring the JS/TS fixtures' own handler/utility call sites, plus one more
+  from `audit.py`'s decorated `record` method), truncates to 15 shown + "+3 more".
+- Line-shift case (requirement 4): confirmed — `handlers.py` has `validate_and_persist_signup`
+  immediately followed by `handle_signup_route` and `retry_queue_worker`, same shape as
+  `fixtures/javascript/repomap/handlers.js`. Has a checked-in Tier 1 test from the start
+  (`test_reindex_file_leaves_line_shifted_functions_call_graph_intact` in
+  `sidecar/tests/test_repomap_python.py`), following TypeScript's precedent rather than
+  JavaScript's still-open gap (session 23's Handoff).
+- Single top-level file (requirement 5): confirmed — `fixtures/python/sample.py`. Not a line-for-line
+  byte-identical mirror of `sample.js`/`sample.ts` the way TypeScript's is (Python's syntax doesn't
+  let `add`/`greet` sit at the exact same column shapes), but deliberately reproduces the same
+  comment/blank-line layout so `add`'s body lands at 0-indexed line 4 and `greet`'s body at line 8 —
+  the exact positions `hover.test.ts`'s hardcoded `Position(4, 10)`/`Position(8, 10)` assert against.
+  Also includes `double`/`makeCounter`-equivalent functions (`double`, `make_counter` with a nested
+  `increment` closure) for parity with the other fixtures' shapes, even though nothing in the
+  current suite asserts on them by name.
+- Python-specific construct beyond what JS/TS can exercise: `audit.py`'s `AuditLogger.record`, a
+  class method decorated with a bare (non-call) `@traced`. Confirms two structural facts from
+  session 83's audit against a real fixture rather than only a synthetic snippet: Python has no
+  separate "method" node (`record` is an ordinary `function_definition`, resolved the same way a
+  free function is, via `logger.record(event)`'s attribute-call), and a bare decorator produces no
+  call-graph edge at all (`traced` has zero real callers) since it's a sibling node to the function
+  it wraps, not a call argument — the same known, accepted gap TS's own `@traced` example already
+  documents.
+
+**Known, deliberately unaddressed gap carried out of this session:** `functionResolution.ts`'s
+`vscode.executeDocumentSymbolProvider` call (the extension-host mechanism every hover/panel feature
+resolves functions through, for every language) depends on VS Code having a registered
+`DocumentSymbolProvider` for the file's language id. JS/TS get one built in; Python does not — a
+workspace needs the separate Python extension (Pylance or another Python language server) installed
+and active. The integration test host (`runTest.ts`) deliberately installs no extensions beyond VS
+Code's own built-ins (see that file's own comment), so `LUCIDHOVER_FIXTURE_LANGUAGE=python npm run
+test:integration` cannot exercise `hover.test.ts` the way the `javascript`/`typescript` runs do — see
+session 91's own artifact for what was actually run and observed. This is the real risk session
+20/83 already flagged and explicitly left to "the Python adapter session's call" to resolve; session
+91 resolved `resolutionStrategy`'s *value* (`"tree-sitter-only"`, matching every other language,
+since no `"lsp-wrapped"` mechanism exists anywhere in the code to select) but did not build a
+fallback/degrade path or an LSP-wrapped resolution mechanism — that remains explicitly out of scope,
+a real follow-up candidate for a future session, not an oversight of this one.

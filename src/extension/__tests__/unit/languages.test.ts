@@ -13,32 +13,37 @@ import {
 const REPO_ROOT = path.resolve(__dirname, '../../../../');
 
 describe('languages.ts (repo-root languages.json reader)', () => {
-    it('loads the real languages.json -- javascript, typescript, and typescriptreact today', () => {
+    it('loads the real languages.json -- javascript, typescript, typescriptreact, and python today', () => {
         const languages = supportedLanguages();
-        assert.strictEqual(languages.length, 3);
+        assert.strictEqual(languages.length, 4);
         const byId = new Map(languages.map((entry) => [entry.vscodeLanguageId, entry]));
         assert.deepStrictEqual(byId.get('javascript')?.extensions, ['.js', '.jsx']);
         assert.deepStrictEqual(byId.get('typescript')?.extensions, ['.ts']);
         assert.deepStrictEqual(byId.get('typescriptreact')?.extensions, ['.tsx']);
+        assert.deepStrictEqual(byId.get('python')?.extensions, ['.py']);
     });
 
     it('isSupportedLanguageId is true only for a manifest vscodeLanguageId -- everything else is the "no adapter" case', () => {
         assert.strictEqual(isSupportedLanguageId('javascript'), true);
         assert.strictEqual(isSupportedLanguageId('typescript'), true);
         assert.strictEqual(isSupportedLanguageId('typescriptreact'), true);
-        assert.strictEqual(isSupportedLanguageId('python'), false);
+        assert.strictEqual(isSupportedLanguageId('python'), true);
+        // Session 91: python moved from the "no adapter" example to a real
+        // adapter -- ruby takes over as the still-unsupported probe language
+        // (see languageGating.test.ts / fixtures/REQUIREMENTS.md).
+        assert.strictEqual(isSupportedLanguageId('ruby'), false);
         assert.strictEqual(isSupportedLanguageId(''), false);
     });
 
     it('documentSelectorForSupportedLanguages derives one selector entry per manifest language', () => {
         assert.deepStrictEqual(
             documentSelectorForSupportedLanguages().map((s) => s.language).sort(),
-            ['javascript', 'typescript', 'typescriptreact']
+            ['javascript', 'python', 'typescript', 'typescriptreact']
         );
     });
 
     it('allSupportedExtensions unions every manifest language\'s extensions', () => {
-        assert.deepStrictEqual(allSupportedExtensions().slice().sort(), ['.js', '.jsx', '.ts', '.tsx']);
+        assert.deepStrictEqual(allSupportedExtensions().slice().sort(), ['.js', '.jsx', '.py', '.ts', '.tsx']);
     });
 
     it('hasSupportedExtension matches any manifest extension, not just the first', () => {
@@ -46,7 +51,8 @@ describe('languages.ts (repo-root languages.json reader)', () => {
         assert.strictEqual(hasSupportedExtension('src/Foo.jsx'), true);
         assert.strictEqual(hasSupportedExtension('src/foo.ts'), true);
         assert.strictEqual(hasSupportedExtension('src/foo.tsx'), true);
-        assert.strictEqual(hasSupportedExtension('src/foo.py'), false);
+        assert.strictEqual(hasSupportedExtension('src/foo.py'), true);
+        assert.strictEqual(hasSupportedExtension('src/foo.rb'), false);
     });
 
     describe('package.json activationEvents agreement (Session 22 item 2 -- required, not optional)', () => {

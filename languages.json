@@ -65,5 +65,25 @@
       "reference.call": "call",
       "reference.jsx": "jsx"
     }
+  },
+  "python": {
+    "displayName": "Python",
+    "vscodeLanguageId": "python",
+    "extensions": [".py"],
+    "treeSitter": {
+      "grammarPackage": "tree_sitter_python",
+      "grammarFunction": "language"
+    },
+    "tagQueryFile": "python_tags.scm",
+    "exclusions": {
+      "dirs": ["__pycache__", ".venv", "venv", ".mypy_cache", ".pytest_cache", ".tox", "build", "dist"],
+      "defNames": [],
+      "refNames": []
+    },
+    "resolutionStrategy": "tree-sitter-only",
+    "captureKindMap": {
+      "definition.function": "function",
+      "reference.call": "call"
+    }
   }
 }

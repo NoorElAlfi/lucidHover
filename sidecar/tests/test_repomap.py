@@ -158,20 +158,22 @@ def test_find_source_files_includes_every_registered_language_excludes_unknown(t
     directly against a real React component before adding this -- see
     session-08 artifact), so it's included. `.ts`/`.tsx` are registered as of
     Session 24 (their own grammars, via the "typescript"/"typescriptreact"
-    manifest entries) and are now included too. `.py` has no registered
-    adapter -- confirm it's still NOT silently (mis)picked up, same as `.ts`
-    was before Session 24 added it.
+    manifest entries) and are now included too. `.py` is registered as of
+    Session 91 and is now included too. `.rb` has no registered adapter --
+    confirm it's still NOT silently (mis)picked up, same role `.py` played
+    before Session 91 gave it a real adapter.
     """
     (tmp_path / "a.js").write_text("function a() {}", encoding="utf-8")
     (tmp_path / "b.jsx").write_text("function B() { return <div />; }", encoding="utf-8")
     (tmp_path / "c.ts").write_text("function c(): void {}", encoding="utf-8")
     (tmp_path / "d.tsx").write_text("function D(): JSX.Element { return <div />; }", encoding="utf-8")
     (tmp_path / "e.py").write_text("def e(): pass", encoding="utf-8")
+    (tmp_path / "g.rb").write_text("def g\nend\n", encoding="utf-8")
     (tmp_path / "node_modules").mkdir()
     (tmp_path / "node_modules" / "f.jsx").write_text("function F() {}", encoding="utf-8")
 
     found = {os.path.basename(f) for f in find_source_files(str(tmp_path))}
-    assert found == {"a.js", "b.jsx", "c.ts", "d.tsx"}
+    assert found == {"a.js", "b.jsx", "c.ts", "d.tsx", "e.py"}
 
 
 def test_reindex_file_leaves_other_files_call_graph_intact(scratch_repo_map):

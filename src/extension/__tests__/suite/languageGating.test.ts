@@ -4,9 +4,15 @@ import * as vscode from 'vscode';
 
 /**
  * Session 22 item 4: a file whose language has no adapter (languages.json
- * has exactly one entry, "javascript" -- everything else is "no adapter"
- * today, including "python") must get nothing from every provider -- not an
- * empty/placeholder hover or lens, no invocation at all.
+ * originally had exactly one entry, "javascript" -- everything else was "no
+ * adapter", including "python") must get nothing from every provider -- not
+ * an empty/placeholder hover or lens, no invocation at all.
+ *
+ * Session 91: python gained a real adapter, so it can no longer serve as
+ * this test's "unsupported language" probe -- ruby (still absent from
+ * languages.json) takes over. Every fixture directory carries its own
+ * `sample.rb` copy (same content, see fixtures/REQUIREMENTS.md), the same
+ * convention `sample.py` followed before this session.
  *
  * Exercised through VS Code's own `vscode.execute*Provider` commands rather
  * than calling `ExplanationHoverProvider`/`RoleCodeLensProvider` directly,
@@ -22,8 +28,8 @@ suite('language gating: no adapter for an unsupported language (Session 22)', ()
         const folders = vscode.workspace.workspaceFolders;
         assert.ok(folders && folders.length > 0, 'expected the fixture repo to be open as the test workspace');
         const workspaceRoot = folders[0].uri.fsPath;
-        document = await vscode.workspace.openTextDocument(path.join(workspaceRoot, 'sample.py'));
-        assert.strictEqual(document.languageId, 'python', 'expected VS Code to assign the python language id to sample.py');
+        document = await vscode.workspace.openTextDocument(path.join(workspaceRoot, 'sample.rb'));
+        assert.strictEqual(document.languageId, 'ruby', 'expected VS Code to assign the ruby language id to sample.rb');
     });
 
     test('hover: vscode.executeHoverProvider returns nothing', async () => {
