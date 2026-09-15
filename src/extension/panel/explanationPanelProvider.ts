@@ -1693,8 +1693,10 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
             return;
         }
 
-        const ordered = payload.nodes.slice().sort((a, b) => a.depth - b.depth);
-        for (const node of ordered) {
+        // payload.nodes already arrives in strict depth order from
+        // get_call_trace's own linear walk (verified Session 101) -- no
+        // re-sort needed here.
+        for (const node of payload.nodes) {
             const section = document.createElement('section');
             section.className = 'lh-section';
 
