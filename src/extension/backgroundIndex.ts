@@ -37,6 +37,29 @@ type BackgroundIndexPhase = 'idle' | 'running' | 'pausing' | 'paused';
 const DELAY_BETWEEN_GENERATIONS_MS = 1000;
 
 /**
+ * Session 93: bounds the retry-with-backoff `resolveFileSymbols` below now
+ * does around its `resolveAllFunctions` call. `backgroundIndexManager.start()`
+ * fires immediately at trusted-workspace-open (`extension.ts`'s
+ * `startIndexing()`), with no wait for a language extension backing
+ * `vscode.executeDocumentSymbolProvider` to finish activating -- fine for
+ * JS/TS, whose built-in language service is synchronous and always ready,
+ * but a real gap for an external one (confirmed live, session 93: Python's
+ * Pylance can still be cold-starting/indexing at that moment). Before this
+ * fix, a single empty response on that one call permanently marked every
+ * ranked function in the file `unresolved` for the rest of the pass --
+ * unlike hover's own `resolveEnclosingFunction`, which is re-invoked fresh
+ * on every hover and so naturally gets a second chance once the user next
+ * hovers, background indexing's one-shot-per-file call never got one. Same
+ * bound (40 attempts x 250ms = up to 10s) `hover.test.ts`'s own `suiteSetup`
+ * already established as enough for a real language service to warm up --
+ * paid at most once per file, since `getFileSymbols`'s own `Promise`
+ * memoization means only the first ranked function claimed from a given
+ * file ever pays for the wait.
+ */
+const SYMBOL_RESOLUTION_MAX_ATTEMPTS = 40;
+const SYMBOL_RESOLUTION_RETRY_DELAY_MS = 250;
+
+/**
  * Session 71: reverted to `1` -- back to a strictly-one-at-a-time
  * background loop, closing the collision-frequency follow-up sessions
  * 67/69/70 all carried forward. Session 67 shipped `2` on severity data
@@ -462,7 +485,7 @@ export class BackgroundIndexManager implements vscode.Disposable {
         const getFileSymbols = (relFname: string): Promise<ResolvedFunction[]> => {
             let promise = fileSymbolPromises.get(relFname);
             if (!promise) {
-                promise = this.resolveFileSymbols(workspaceRoot, relFname);
+                promise = this.resolveFileSymbols(workspaceRoot, relFname, token);
                 fileSymbolPromises.set(relFname, promise);
             }
             return promise;
@@ -505,6 +528,15 @@ export class BackgroundIndexManager implements vscode.Disposable {
                 }
 
                 const symbols = await getFileSymbols(entry.rel_fname);
+                if (token.isCancellationRequested) {
+                    // A pause/dispose landing mid-retry inside
+                    // resolveFileSymbols (session 93) must not be counted as
+                    // a real "couldn't resolve" -- bail the same way the
+                    // other checkpoints in this loop already do, rather than
+                    // inflating `unresolved` with an artifact of the
+                    // cancellation itself.
+                    return;
+                }
                 const resolved = this.matchRankedEntry(entry, symbols);
                 if (!resolved) {
                     // A def tree-sitter saw but VS Code's document-symbol
@@ -642,11 +674,30 @@ export class BackgroundIndexManager implements vscode.Disposable {
         this.updateStatusBar();
     }
 
-    private async resolveFileSymbols(workspaceRoot: string, relFile: string): Promise<ResolvedFunction[]> {
+    /**
+     * Session 93: retries a bounded number of times (see
+     * `SYMBOL_RESOLUTION_MAX_ATTEMPTS`/`SYMBOL_RESOLUTION_RETRY_DELAY_MS`'s
+     * doc comment) when the symbol provider comes back empty, instead of a
+     * single unretried attempt -- closes the Pylance-cold-start race that
+     * previously permanently marked every ranked function in a file
+     * `unresolved` for the whole pass.
+     */
+    private async resolveFileSymbols(
+        workspaceRoot: string,
+        relFile: string,
+        token: vscode.CancellationToken
+    ): Promise<ResolvedFunction[]> {
         try {
             const uri = vscode.Uri.file(path.join(workspaceRoot, relFile));
             const document = await vscode.workspace.openTextDocument(uri);
-            return await resolveAllFunctions(document, workspaceRoot);
+            for (let attempt = 0; attempt < SYMBOL_RESOLUTION_MAX_ATTEMPTS; attempt++) {
+                const resolved = await resolveAllFunctions(document, workspaceRoot);
+                if (resolved.length > 0 || token.isCancellationRequested) {
+                    return resolved;
+                }
+                await this.delay(SYMBOL_RESOLUTION_RETRY_DELAY_MS, token);
+            }
+            return [];
         } catch (err) {
             this.output.appendLine(`background-index: failed to open ${relFile}: ${String(err)}`);
             return [];

@@ -802,6 +802,121 @@ suite('backgroundIndex pause/resume (Session 52)', () => {
     });
 
     /**
+     * Session 93: `resolveFileSymbols`'s one-shot `resolveAllFunctions` call
+     * used to permanently mark every ranked function in a file `unresolved`
+     * for the rest of the pass if the symbol provider (e.g. Pylance, still
+     * cold-starting at the moment `backgroundIndexManager.start()` fires at
+     * trusted-workspace-open) returned empty even once -- confirmed live
+     * against a real, freshly-installed Pylance instance in a real Extension
+     * Development Host before this fix (see the session's own artifact).
+     * These stub `functionResolution.resolveAllFunctions` directly (same
+     * pattern the "same-file dedup" test above already uses) rather than
+     * depending on a real external language server's actual timing, so the
+     * retry behavior itself is deterministic and not at the mercy of how
+     * fast Pylance happens to warm up on whatever machine runs the suite.
+     */
+    suite('symbol-provider cold-start retry (Session 93)', () => {
+        test('retries when the symbol provider is briefly cold, instead of leaving the function permanently unresolved', async function () {
+            this.timeout(20_000);
+
+            sandbox.stub(sidecar, 'waitForInteractiveIdle').resolves();
+            const requestStub = sandbox.stub(sidecar, 'request');
+            requestStub.withArgs('list_ranked_functions').resolves({
+                functions: [{ rel_fname: 'a.js', name: 'a', line: 0, importance: 1 }],
+            });
+            requestStub.withArgs('generate_explanation').resolves({
+                context_hash: 'ctx',
+                context_tier: 'call_graph_only',
+                explanation: { role_tag: 'utility', one_liner: 'explained a' },
+            });
+
+            let callCount = 0;
+            const realResolveAllFunctions = functionResolution.resolveAllFunctions;
+            sandbox
+                .stub(functionResolution, 'resolveAllFunctions')
+                .callsFake(async (document: vscode.TextDocument, workspaceRoot: string) => {
+                    callCount++;
+                    if (callCount <= 2) {
+                        // Simulates a still-cold-starting external symbol
+                        // provider -- empty, not an error, same shape a real
+                        // one returns before it's finished activating.
+                        return [];
+                    }
+                    return realResolveAllFunctions(document, workspaceRoot);
+                });
+
+            manager.start();
+            await waitForPhase('idle');
+
+            assert.ok(
+                callCount >= 3,
+                `expected at least 3 resolveAllFunctions calls (2 simulated-cold + 1 real), got ${callCount}`
+            );
+            assert.strictEqual(
+                requestStub.getCalls().filter((c) => c.args[0] === 'generate_explanation').length,
+                1,
+                'expected a() to still be generated once the retry succeeded, not left unresolved forever'
+            );
+            const statusBarItem = (manager as unknown as { statusBarItem: vscode.StatusBarItem }).statusBarItem;
+            assert.strictEqual(
+                statusBarItem.text,
+                '$(check) LucidHover: 1/1 explained',
+                `expected full coverage once the retry recovered, got: ${statusBarItem.text}`
+            );
+        });
+
+        test('gives up after the retry budget is exhausted, marking the function unresolved rather than hanging the pass', async function () {
+            this.timeout(20_000);
+
+            sandbox.stub(sidecar, 'waitForInteractiveIdle').resolves();
+            const requestStub = sandbox.stub(sidecar, 'request');
+            requestStub.withArgs('list_ranked_functions').resolves({
+                functions: [{ rel_fname: 'a.js', name: 'a', line: 0, importance: 1 }],
+            });
+            sandbox.stub(functionResolution, 'resolveAllFunctions').resolves([]);
+
+            manager.start();
+            await waitForPhase('idle');
+
+            assert.strictEqual(
+                requestStub.getCalls().filter((c) => c.args[0] === 'generate_explanation').length,
+                0,
+                'expected no generation attempt for a function whose symbols never resolved'
+            );
+            const statusBarItem = (manager as unknown as { statusBarItem: vscode.StatusBarItem }).statusBarItem;
+            assert.strictEqual(
+                statusBarItem.text,
+                '$(check) LucidHover: 0/1 explained',
+                `expected the pass to still complete (not hang) with the function counted unresolved, got: ${statusBarItem.text}`
+            );
+        });
+
+        test('pausing during a retry wait does not count the still-resolving function as unresolved', async function () {
+            this.timeout(20_000);
+
+            sandbox.stub(sidecar, 'waitForInteractiveIdle').resolves();
+            const requestStub = sandbox.stub(sidecar, 'request');
+            requestStub.withArgs('list_ranked_functions').resolves({
+                functions: [{ rel_fname: 'a.js', name: 'a', line: 0, importance: 1 }],
+            });
+            sandbox.stub(functionResolution, 'resolveAllFunctions').resolves([]);
+
+            manager.start();
+            // Let the retry loop start waiting (past its first, immediate
+            // empty attempt) before pausing mid-wait.
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            manager.pause();
+            await waitForPhase('paused');
+
+            const statusBarItem = (manager as unknown as { statusBarItem: vscode.StatusBarItem }).statusBarItem;
+            assert.ok(
+                (statusBarItem.tooltip as string).includes('0 generated, 0 already cached, 0 unresolved'),
+                `expected 0 unresolved -- a pause mid-retry must not be miscounted as a real resolution failure, got: ${statusBarItem.tooltip}`
+            );
+        });
+    });
+
+    /**
      * Session 67: raises `run()`'s generation loop from strictly-one-at-a-time
      * to a small concurrent worker pool (closing the strategy review's #2
      * backlog item). These tests construct their own `BackgroundIndexManager`
