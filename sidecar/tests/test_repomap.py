@@ -8,6 +8,12 @@ mid-session once a real target repo turned out to have a JSX frontend).
 Session 24 renames `find_js_files` to `find_source_files` (now walking every
 registered language, not just JavaScript, once TypeScript became a second
 one) and updates the extension-inclusion test below accordingly.
+
+`handlers.js` gained a ninth handler, `handleAdminDashboard` (chat-requested,
+outside the session log -- a manual-testing aid for the docked panel's
+"Calls" list scrolling past its own ~4-5-row max-height), bumping the count
+from 21 to 22; deliberately calls none of `logEvent`'s existing 17 callers so
+`logEvent`'s own >15-caller/truncation numbers below stay unchanged.
 """
 
 import os
@@ -35,7 +41,7 @@ def _node(rel_fname, name, line):
 
 
 def test_indexes_all_functions(repo_map):
-    assert len(repo_map.list_functions()) == 21
+    assert len(repo_map.list_functions()) == 22
 
 
 def test_most_called_function_ranks_highest(repo_map):
@@ -146,7 +152,7 @@ def test_reindex_file_before_index_falls_back_to_a_real_full_index(tmp_path):
     functions_indexed = rm.reindex_file("utils.js")
 
     assert functions_indexed == 4  # validateEmail, hashPassword, formatDate, isEmpty
-    assert len(rm.list_functions()) == 21  # every file, not just utils.js
+    assert len(rm.list_functions()) == 22  # every file, not just utils.js
     insert_user = next(n for n in rm.list_functions() if n[1] == "insertUser")
     callee_names = {(c.rel_fname, c.name) for c in rm.get_function_context(*insert_user).callees}
     assert ("utils.js", "validateEmail") in callee_names

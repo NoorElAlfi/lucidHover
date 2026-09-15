@@ -866,7 +866,23 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
         padding: 0 4px;
         border-radius: 3px;
     }
-    .lh-refs { list-style: none; }
+    /* A "used by"/"calls" list shows every real entry (no hard display cap
+       -- the count badge next to the section title must always match what's
+       actually reachable here), scrolling internally past ~4-5 rows rather
+       than pushing the rest of the card down. */
+    .lh-refs {
+        list-style: none;
+        max-height: 136px;
+        overflow-y: auto;
+        padding-right: 4px;
+    }
+    .lh-refs::-webkit-scrollbar { width: 10px; }
+    .lh-refs::-webkit-scrollbar-thumb {
+        background: var(--vscode-scrollbarSlider-background);
+        border-radius: 5px;
+    }
+    .lh-refs::-webkit-scrollbar-thumb:hover { background: var(--vscode-scrollbarSlider-hoverBackground); }
+    .lh-refs::-webkit-scrollbar-thumb:active { background: var(--vscode-scrollbarSlider-activeBackground); }
     .lh-refs button.lh-ref-row {
         appearance: none;
         border: none;
@@ -1246,7 +1262,7 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
     function refList(names) {
         const ul = document.createElement('ul');
         ul.className = 'lh-refs';
-        for (const name of names.slice(0, 3)) {
+        for (const name of names) {
             ul.appendChild(refRow(name));
         }
         return ul;

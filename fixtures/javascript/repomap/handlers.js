@@ -16,7 +16,6 @@ function validateAndPersistSignup(data) {
   const user = insertUser(data);
   sendWelcomeEmail(user);
   logEvent(`signup persisted for ${data.email}`);
-  return user;
 }
 
 function handleSignupRoute(req, res) {
@@ -68,6 +67,28 @@ function handleHealthCheck(req, res) {
   res.status(200).end();
 }
 
+// Exercises the docked panel's "Calls" list scrolling past its ~4-5-row
+// max-height, via a real, non-fabricated callee edge for each name (every
+// one of these is a genuine import already used elsewhere in this file) --
+// 7 real callees. Deliberately avoids two functions this fixture already
+// uses as exact-caller-set/blast-radius test anchors:
+// `logEvent` (>15-caller/truncation case, REQUIREMENTS.md/
+// `test_truncates_callers_past_cap_with_omitted_count`) and `validateEmail`
+// (blast-radius root with a hardcoded depth-1/depth-2 caller set,
+// `test_get_blast_radius_multi_hop_with_shared_convergent_node` and
+// siblings) -- a 9th/3rd real caller on either would shift hardcoded
+// counts in tests unrelated to this function's own purpose.
+function handleAdminDashboard(req, res) {
+  const user = findUserByEmail(req.query.email);
+  hashPassword(req.body.newPassword);
+  updateUser(user.id, req.body);
+  deleteUser(req.body.staleUserId);
+  sendWelcomeEmail(user);
+  sendPasswordReset(user);
+  renderTemplate('admin-dashboard', { user });
+  res.status(200).end();
+}
+
 module.exports = {
   validateAndPersistSignup,
   handleSignupRoute,
@@ -78,4 +99,5 @@ module.exports = {
   handlePasswordResetRoute,
   handleRenderRoute,
   handleHealthCheck,
+  handleAdminDashboard,
 };
