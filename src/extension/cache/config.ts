@@ -185,8 +185,64 @@ export const EMBEDDING_MODEL_ID = 'all-minilm';
  * function 12) -- confirmed via `keep_alive: 0` unload resetting whatever
  * accumulates, so a periodic model unload is a viable workaround if this
  * later proves to affect real `BackgroundIndexManager` runs.
+ *
+ * `few-shot-v7` (was `few-shot-v6`): fixes a real, 100%-reproducible bug
+ * found live via the docked panel's `LucidHover: Explanation` command on
+ * `fixtures/python/repomap/handlers.py`'s `handle_signup_route`: with the
+ * retrieval tier populated (Session 11's `retrieved_chunks`, built from a
+ * real embedded `VectorStore`, not the empty-list call-graph-only path),
+ * `why_it_exists`/`side_effects` fabricated a caller claim (including
+ * self-reference: the function named as its own caller) and misattributed
+ * sibling route handlers' and a real callee's own bodies as this function's
+ * behavior -- root cause: `_format_retrieved_section`'s header was a bare
+ * `"Retrieved context (N):"` with no explanation of what the section *is*,
+ * and none of the (then six) few-shot examples ever included a "Retrieved
+ * context" section at all, so the model had zero grounding for what to do
+ * with it and treated the chunks as caller/callee/behavior evidence.
+ *
+ * Fix: reworded the header alone (in `_format_retrieved_section`) to state
+ * inline that the section is "background only, NOT this function's
+ * callers/callees, never evidence of its own behavior" -- no `SYSTEM_
+ * INSTRUCTION` field-rule addition, no new few-shot example. This was a
+ * deliberate result of live A/B testing, not the first design tried: a
+ * fuller fix (a new `SYSTEM_INSTRUCTION` field-rule paragraph explaining
+ * the retrieval tier, plus a seventh few-shot example demonstrating the
+ * zero-callers-plus-retrieved-context shape) also fixed the original bug,
+ * but a live cross-function regression pass caught it introducing a *new*
+ * failure on a different function (`handle_render_route`): the reasoning
+ * stage collapsed into a near-verbatim copy of `_EXAMPLE_6`'s (`traced`)
+ * reasoning text -- "No callers or callees are given for this function"
+ * -- even though 2 real callees were given, and `calls` correspondingly
+ * dropped a real callee. A leaner variant (the field-rule paragraph alone,
+ * no new example) reduced but did not eliminate that same collapse. The
+ * one-line header-only version was the first that showed zero regressions
+ * across every re-tested function while still fixing the original bug.
+ *
+ * Verified (live, real Ollama `qwen2.5-coder:1.5b`, `temperature=0`, model
+ * unloaded via `keep_alive: 0` before each batch per the resource-
+ * exhaustion note above) against all three fixtures, with retrieval:
+ * `handle_signup_route`/`handleSignupRoute` (Python/JS/TS): before, a
+ * sprawling fabricated `why_it_exists`/`side_effects` (in the worst
+ * reproduction, a 13-item `side_effects` list built from unrelated sibling
+ * functions' bodies); after, `side_effects` consistently correct (just the
+ * one real `log_event` effect), `used_by`/`calls` correct in every trial.
+ * `handle_render_route`, `handle_login_route`, `handle_update_route`
+ * (Python), `handleDeleteRoute`/`validateAndPersistSignup` (TS/JS), and
+ * `validate_and_persist_signup` (a real-callers case, Python) all came back
+ * with `used_by`/`calls` exactly matching the real call graph, no dropped
+ * or invented names, both before and after -- no regression.
+ *
+ * Residual, NOT fixed here, confirmed pre-existing (reproduces on baseline
+ * `few-shot-v6` too, independent of retrieval): a zero-caller function can
+ * still hallucinate a phantom caller in `why_it_exists` -- sometimes the
+ * function's own name (self-reference), sometimes an invented name
+ * (`handle_render_route` baseline: `"handle_request"`; `handle_delete_route`
+ * baseline: a fabricated REST route string). This is the zero-caller analog
+ * of sessions 25/42/92/96's own repeatedly-documented "measured reduction,
+ * not full elimination" pattern for this 1.5B model and was out of scope
+ * for this retrieval-specific fix -- left for a future session.
  */
-export const PROMPT_VERSION = 'few-shot-v6';
+export const PROMPT_VERSION = 'few-shot-v7';
 
 /**
  * Session 66: default background-indexing scope. A full-repo pass

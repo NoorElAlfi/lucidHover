@@ -79,14 +79,16 @@ def test_example_3_context_bundle_matches_real_formatting():
 def test_no_retrieved_chunks_renders_none():
     ctx = FunctionContext("a.js", "target", 0, callers=[], callees=[])
     bundle = build_context_bundle(ctx, [])
-    assert "Retrieved context (0):\n  none" in bundle
+    assert "Retrieved context (0)" in bundle
+    assert "\n  none" in bundle
 
 
 def test_retrieved_chunks_are_included_with_their_location():
     ctx = FunctionContext("a.js", "target", 0, callers=[], callees=[])
     chunk = RetrievedChunk(rel_fname="utils.js", start_line=10, end_line=12, text="function helper() {}")
     bundle = build_context_bundle(ctx, [chunk])
-    assert "Retrieved context (1):" in bundle
+    assert "Retrieved context (1)" in bundle
+    assert "background only" in bundle
     assert "utils.js:11-12" in bundle
     assert "function helper() {}" in bundle
 

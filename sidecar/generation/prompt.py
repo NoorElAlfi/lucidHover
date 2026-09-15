@@ -418,7 +418,10 @@ def _format_retrieved_section(retrieved_chunks: list[RetrievedChunk]) -> list[st
     callees. Fixed top-k, no adaptive token-budget truncation (same
     fixed-count-cap style context.py already uses for callers/callees).
     """
-    lines = [f"Retrieved context ({len(retrieved_chunks)}):"]
+    lines = [
+        f"Retrieved context ({len(retrieved_chunks)}) -- background only, NOT this function's "
+        "callers/callees, never evidence of its own behavior:"
+    ]
     if not retrieved_chunks:
         lines.append("  none")
         return lines
