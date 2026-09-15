@@ -45,7 +45,14 @@ explanations in the background. Hovering over an already-indexed function is ins
 cache lookup, never a live model call. A function background indexing hasn't reached yet falls
 back to a one-off synchronous generation on hover, so nothing hovering ever shows nothing.
 
-**Supported languages:** JavaScript, TypeScript, and TSX.
+**Supported languages:** JavaScript, TypeScript, TSX, and Python.
+
+**Python requires a Python language extension.** JavaScript/TypeScript/TSX hover and panel
+features work out of the box, using VS Code's own built-in symbol support. Python has no such
+built-in support — LucidHover needs a Python language extension installed and active (e.g.
+[Pylance](https://marketplace.visualstudio.com/items?itemName=ms-python.python)) to resolve
+functions in `.py` files. Without one, Python hover/panel/CodeLens features are silently inert:
+indexing and generation still work, but nothing surfaces in the editor.
 
 ## Features
 
