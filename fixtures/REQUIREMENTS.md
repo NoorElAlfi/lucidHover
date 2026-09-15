@@ -143,7 +143,7 @@ so ranked call-graph output is identical before and after the move.
 ## TypeScript fixture: checked against this list (Session 24)
 
 `fixtures/typescript/repomap/` — 8 files (`models.ts`, `logging.ts`, `utils.ts`, `db.ts`,
-`email.ts`, `audit.ts`, `handlers.ts`, `dashboard.tsx`), 28 functions total, confirmed via
+`email.ts`, `audit.ts`, `handlers.ts`, `dashboard.tsx`), 31 functions total, confirmed via
 `python -m sidecar.repomap.cli fixtures/typescript/repomap` and checked into
 `sidecar/tests/test_repomap_typescript.py`.
 
@@ -192,6 +192,19 @@ so ranked call-graph output is identical before and after the move.
   a namespaced one, alongside the file's pre-existing lowercase `<div>` host element (confirmed to
   still produce no reference at all). Function count moved from 26 to 28; `logEvent`'s caller count
   is unchanged at 21 (neither new component calls it).
+- **Session 105 addition:** `dashboard.tsx`'s `Menu` (a plain function since session 78) became the
+  real `Object.assign` compound-component pattern session 77 separately flagged as invisible on the
+  *definition* side — `MenuRoot` and `MenuItem` (two new functions) plus `const Menu =
+  Object.assign(MenuRoot, {Item: MenuItem})` (not itself a definition Tag; see
+  `js_ts_aliases.scm`/`graph.py`'s `_resolve_callees`), so `<Menu.Item />`'s pre-existing
+  root-identifier resolution to "Menu" now resolves *through* the alias into `MenuRoot`'s real
+  definition. Also added `TooltipArrow`/`Tooltip` plus `Tooltip.Arrow = TooltipArrow` (a static-
+  property assignment to an already-declared function reference — session 77's separately-flagged,
+  "not separately tested" second idiom, distinct from `Object.assign`), called once as a plain
+  `Tooltip.Arrow()` inside `Dashboard` (not via JSX — JSX member-expression resolution discards
+  everything but the root identifier, so only a plain call exercises this idiom's own alias).
+  Function count moved from 28 to 31 (net: -1 `Menu`, +4 `MenuRoot`/`MenuItem`/`TooltipArrow`/
+  `Tooltip`); `logEvent`'s caller count is unchanged at 21.
 
 ## Python fixture: checked against this list (Session 91)
 

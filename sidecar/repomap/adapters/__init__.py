@@ -6,11 +6,12 @@ at the repo root for the manifest itself.
 
 from __future__ import annotations
 
-from .base import LanguageAdapter, LanguageManifestEntry, Tag
+from .base import Alias, LanguageAdapter, LanguageManifestEntry, Tag
 from .registry import LanguageRegistry, get_registry
 from .tree_sitter import TreeSitterAdapter
 
 __all__ = [
+    "Alias",
     "LanguageAdapter",
     "LanguageManifestEntry",
     "LanguageRegistry",

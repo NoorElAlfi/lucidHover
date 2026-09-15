@@ -35,6 +35,20 @@ call colliding by name with an unrelated `Dropdown.setVisible()` method
 elsewhere in the repo). An ambiguous name with no same-file candidate
 produces edges that exist (for ranking) but are never confident (so never
 shown as a specific function's known caller/callee).
+
+Session 105: a name can also resolve through a compound-component alias
+(`const Menu = Object.assign(MenuRoot, {...})` / `Foo.Bar = existingFn` --
+see `adapters/base.py`'s `Alias` and `js_ts_aliases.scm`'s header for why
+neither idiom produces a `Tag` of its own). `alias_targets` (name -> list of
+already-defined names it should also resolve through) is a purely additional
+index, kept separate from `defs_by_name` rather than pre-expanded into it,
+so a later change to the *target*'s own defs (a different file, reindexed on
+its own) is picked up live at resolution time instead of going stale --
+`_resolve_callees` is the one place both indices are combined. No graph node
+is ever created for an alias name itself: resolving "Menu" through the alias
+just returns MenuRoot's own existing `Tag`(s), so the edge lands on
+MenuRoot's existing node, same as if the reference had been spelled
+"MenuRoot" directly.
 """
 
 from __future__ import annotations
@@ -43,6 +57,7 @@ from collections import defaultdict
 
 import networkx as nx
 
+from .adapters.base import Alias
 from .extraction import Tag
 
 NodeId = tuple[str, str, int]  # (rel_fname, name, start_line)
@@ -94,6 +109,48 @@ def build_indices(
     return defs_by_name, defs_by_file, refs_by_name
 
 
+def build_alias_targets(aliases_by_file: dict[str, list[Alias]]) -> dict[str, list[str]]:
+    """Flatten every file's aliases into one repo-wide `name -> [target_name,
+    ...]` index (Session 105) -- a list, not a single target, since two
+    different files could in principle declare the same alias name against
+    different targets (the same ambiguity `defs_by_name` already tolerates
+    for plain duplicate def names)."""
+    targets: dict[str, list[str]] = defaultdict(list)
+    for aliases in aliases_by_file.values():
+        for alias in aliases:
+            bucket = targets[alias.name]
+            if alias.target_name not in bucket:
+                bucket.append(alias.target_name)
+    return dict(targets)
+
+
+def _resolve_callees(
+    name: str,
+    defs_by_name: dict[str, list[Tag]],
+    alias_targets: dict[str, list[str]],
+) -> list[Tag]:
+    """
+    Session 105: every def a reference named `name` could resolve to --
+    directly (`defs_by_name[name]`, the pre-existing behavior) plus, if
+    `name` is a compound-component alias, whatever its target name(s)
+    already resolve to. Combined into one list so the existing ambiguity/
+    confidence machinery (`_confident_callee_ids`, Session 44) handles a
+    literal-name/alias collision exactly the way it already handles any
+    other same-name collision -- no special-casing needed anywhere else.
+
+    Always re-derived from the live `defs_by_name`/`alias_targets` passed in
+    rather than cached, so a target's defs changing (e.g. the target's own
+    file reindexed independently of the file declaring the alias) is picked
+    up automatically at the next resolution -- see the module docstring.
+    """
+    resolved = list(defs_by_name.get(name, []))
+    for target_name in alias_targets.get(name, []):
+        for tag in defs_by_name.get(target_name, []):
+            if tag not in resolved:
+                resolved.append(tag)
+    return resolved
+
+
 def _add_or_increment_edge(
     graph: nx.DiGraph, caller_id: NodeId, callee_id: NodeId, confident: bool
 ) -> None:
@@ -120,15 +177,23 @@ def _confident_callee_ids(callees: list[Tag], ref_rel_fname: str) -> set[NodeId]
     return {_node_id(c) for c in same_file}
 
 
-def build_call_graph(tags_by_file: dict[str, list[Tag]]) -> nx.DiGraph:
+def build_call_graph(
+    tags_by_file: dict[str, list[Tag]],
+    aliases_by_file: dict[str, list[Alias]] | None = None,
+) -> nx.DiGraph:
     """
     Build a directed graph where nodes are function/method definitions and
     an edge caller -> callee means caller's body contains a call resolving
     to callee's name. Ambiguous names (defined in multiple files) fan out to
     every matching definition, same as Aider does for unresolved-file idents
     -- each such edge is marked `confident` or not per `_confident_callee_ids`.
+
+    Session 105: `aliases_by_file` (default `{}`, i.e. no aliases) widens
+    resolution to also follow compound-component aliases -- see
+    `_resolve_callees`.
     """
     defs_by_name, defs_by_file, refs_by_name = build_indices(tags_by_file)
+    alias_targets = build_alias_targets(aliases_by_file or {})
     all_defs = [d for defs in defs_by_file.values() for d in defs]
     all_refs = [r for refs in refs_by_name.values() for r in refs]
 
@@ -140,7 +205,7 @@ def build_call_graph(tags_by_file: dict[str, list[Tag]]) -> nx.DiGraph:
         caller_def = _enclosing_def(ref, defs_by_file)
         if caller_def is None:
             continue  # top-level call, not inside any tracked function
-        callees = defs_by_name.get(ref.name)
+        callees = _resolve_callees(ref.name, defs_by_name, alias_targets)
         if not callees:
             continue  # unresolved: external/builtin call, no matching def
         caller_id = _node_id(caller_def)
@@ -157,6 +222,7 @@ def update_call_graph_for_file(
     defs_by_name: dict[str, list[Tag]],
     defs_by_file: dict[str, list[Tag]],
     refs_by_name: dict[str, list[Tag]],
+    alias_targets: dict[str, list[str]],
     rel_fname: str,
     old_defs: list[Tag],
     old_refs: list[Tag],
@@ -164,11 +230,25 @@ def update_call_graph_for_file(
     new_refs: list[Tag],
 ) -> None:
     """
-    Mutate `graph` (plus the three index dicts, which are updated in place so
+    Mutate `graph` (plus the four index dicts, which are updated in place so
     the caller's copies stay authoritative) to reflect `rel_fname`'s tag set
     changing from (old_defs, old_refs) to (new_defs, new_refs), producing the
     same graph `build_call_graph` would from a full re-scan of every file --
     without re-scanning any file other than `rel_fname` itself.
+
+    Session 105: this function assumes `alias_targets` itself is unchanged by
+    this update -- i.e. `rel_fname`'s own compound-component alias
+    declarations, if any, are the same before and after. `RepoMap.reindex_file`
+    checks that separately and falls back to a full `index()` when it isn't
+    true (see that method's own docstring for why: an alias disappearing or
+    retargeting can invalidate an edge in a completely different, unreindexed
+    file -- e.g. `<Menu>` in file C, aliased via file A -- which nothing
+    incremental here can safely detect or clean up without rescanning every
+    ref of that name repo-wide, which is exactly what a full index already
+    does). What this function *does* handle incrementally is `rel_fname`
+    being the *target* of an alias declared elsewhere and unchanged (e.g.
+    `MenuRoot` moving lines within its own file, or gaining/losing its own
+    def) -- see `alias_reverse` below.
 
     This is possible without a whole-repo rescan because of one structural
     fact `build_call_graph` already relies on: `_enclosing_def` resolves a
@@ -218,12 +298,12 @@ def update_call_graph_for_file(
         graph.add_node(_node_id(d), rel_fname=d.rel_fname, name=d.name, line=d.start_line)
 
     # This file's own outgoing edges: its refs against the current (global)
-    # def-name index.
+    # def-name index, plus any alias that name resolves through.
     for ref in new_refs:
         caller_def = _enclosing_def(ref, defs_by_file)
         if caller_def is None:
             continue
-        callees = defs_by_name.get(ref.name)
+        callees = _resolve_callees(ref.name, defs_by_name, alias_targets)
         if not callees:
             continue
         caller_id = _node_id(caller_def)
@@ -236,21 +316,34 @@ def update_call_graph_for_file(
     # found via the reverse index instead of scanning every other file.
     # (Old defs need no symmetric step: removing their nodes above already
     # dropped any edges that used to point at them.)
+    #
+    # Session 105: also wire refs literally named an *alias* that points at
+    # one of this file's def names (`alias_reverse`, derived from the
+    # unchanged `alias_targets` -- see the docstring) -- a ref elsewhere
+    # spelled "Menu" needs a new/updated edge into `MenuRoot` exactly like
+    # one spelled "MenuRoot" directly would.
     new_def_names = {d.name for d in new_defs}
-    for name in new_def_names:
-        callees_here = [d for d in new_defs if d.name == name]
-        all_callees_for_name = defs_by_name.get(name, [])
-        for ref in refs_by_name.get(name, []):
-            if ref.rel_fname == rel_fname:
-                continue  # this file's own refs are handled above
-            caller_def = _enclosing_def(ref, defs_by_file)
-            if caller_def is None:
-                continue
-            caller_id = _node_id(caller_def)
-            confident_ids = _confident_callee_ids(all_callees_for_name, ref.rel_fname)
-            for callee in callees_here:
-                callee_id = _node_id(callee)
-                _add_or_increment_edge(graph, caller_id, callee_id, callee_id in confident_ids)
+    alias_reverse: dict[str, list[str]] = defaultdict(list)
+    for alias_name, targets in alias_targets.items():
+        for target_name in targets:
+            alias_reverse[target_name].append(alias_name)
+
+    for def_name in new_def_names:
+        callees_here = [d for d in new_defs if d.name == def_name]
+        wire_names = {def_name} | set(alias_reverse.get(def_name, []))
+        for wire_name in wire_names:
+            all_callees_for_name = _resolve_callees(wire_name, defs_by_name, alias_targets)
+            for ref in refs_by_name.get(wire_name, []):
+                if ref.rel_fname == rel_fname:
+                    continue  # this file's own refs are handled above
+                caller_def = _enclosing_def(ref, defs_by_file)
+                if caller_def is None:
+                    continue
+                caller_id = _node_id(caller_def)
+                confident_ids = _confident_callee_ids(all_callees_for_name, ref.rel_fname)
+                for callee in callees_here:
+                    callee_id = _node_id(callee)
+                    _add_or_increment_edge(graph, caller_id, callee_id, callee_id in confident_ids)
 
     # `confident` (unlike weight) is not purely additive: it's a function of
     # a name's *entire* repo-wide candidate set, so adding or removing a
@@ -273,9 +366,16 @@ def update_call_graph_for_file(
     # mirrors the second loop's own `ref.rel_fname == rel_fname: continue`
     # guard, and every test asserting incremental-vs-full-rebuild equality
     # (`_assert_matches_full_rebuild`) still passes with it in place.
+    # Session 105: also recompute confidence for any alias name that
+    # reverse-maps into one of the literal def names that changed -- handles
+    # the rare collision case where an alias name and a genuine same-named
+    # def coexist repo-wide (see `_resolve_callees`'s docstring).
     affected_names = {d.name for d in old_defs} | new_def_names
+    for def_name in set(affected_names):
+        affected_names.update(alias_reverse.get(def_name, []))
+
     for name in affected_names:
-        callees = defs_by_name.get(name, [])
+        callees = _resolve_callees(name, defs_by_name, alias_targets)
         if not callees:
             continue
         for ref in refs_by_name.get(name, []):

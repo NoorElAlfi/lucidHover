@@ -12,13 +12,25 @@
 // host element (must NOT produce a reference at all -- confirmed at the
 // extraction level, not just absence from the graph), and `<Menu.Item>` (a
 // namespaced/compound usage that resolves to its root identifier, `Menu`,
-// per this session's decision -- see adapters/tree_sitter.py and the
-// session artifact for why "Menu" rather than "Item"). `Menu` is defined
-// here as a plain function, not the `Object.assign` compound-component
-// pattern session 77 found separately invisible on the *definition* side
-// (that gap is unrelated and still open) -- specifically so this reference
-// resolves into a real definition, proving the capture/resolution
-// mechanism itself end-to-end.
+// per that session's decision -- see adapters/tree_sitter.py and that
+// session's artifact for why "Menu" rather than "Item").
+//
+// Session 105 addition: `Menu` is now the real `Object.assign` compound-
+// component pattern session 77 flagged as separately invisible on the
+// *definition* side (`const Menu = Object.assign(MenuRoot, {Item:
+// MenuItem})` previously produced zero graph node for "Menu" at all -- see
+// js_ts_aliases.scm/graph.py's `_resolve_callees`) -- `<Menu.Item>`'s
+// existing root-identifier resolution to "Menu" now actually resolves
+// through the alias into `MenuRoot`'s real definition, closing that gap
+// end-to-end rather than only proving the reference-capture half of it.
+// `Tooltip.Arrow = TooltipArrow` (called once, below, as a plain
+// `Tooltip.Arrow()`) exercises the session's second, distinct idiom --
+// static-property assignment to an already-declared function reference,
+// as opposed to `Object.assign`'s two-argument call form. It's called
+// directly (not via JSX) because JSX member-expression resolution already
+// discards everything but the root identifier ("Tooltip"), so a JSX-only
+// usage would never actually exercise the "Arrow" -> `TooltipArrow` alias
+// this idiom is meant to test.
 
 import { logEvent } from './logging';
 import { findUserByEmail } from './db';
@@ -27,13 +39,29 @@ function UserBadge(props: { label: string }): JSX.Element {
   return <span>{props.label}</span>;
 }
 
-function Menu(props: { children?: JSX.Element }): JSX.Element {
+function MenuRoot(props: { children?: JSX.Element }): JSX.Element {
   return <nav>{props.children}</nav>;
 }
+
+function MenuItem(): JSX.Element {
+  return <span className="menu-item" />;
+}
+
+const Menu = Object.assign(MenuRoot, { Item: MenuItem });
+
+function TooltipArrow(): JSX.Element {
+  return <span className="tooltip-arrow" />;
+}
+
+function Tooltip(props: { label: string }): JSX.Element {
+  return <span className="tooltip">{props.label}</span>;
+}
+Tooltip.Arrow = TooltipArrow;
 
 export function Dashboard(props: { email: string }): JSX.Element {
   const user = findUserByEmail(props.email);
   logEvent(`rendered dashboard for ${props.email}`);
+  Tooltip.Arrow();
   return (
     <div className="dashboard">
       <UserBadge label="primary" />

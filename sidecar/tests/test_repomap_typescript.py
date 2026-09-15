@@ -18,6 +18,13 @@ Session 78 added `dashboard.tsx`'s `UserBadge`/`Menu` (two new function
 components exercising the new jsx_opening_element/jsx_self_closing_element
 reference capture), bumping the count from 26 to 28 -- see the JSX-specific
 tests near the bottom of this file.
+
+Session 105 replaced `dashboard.tsx`'s plain-function `Menu` with the real
+`Object.assign` compound-component pattern (`MenuRoot`/`MenuItem`) session 77
+had separately flagged as invisible on the definition side, and added a
+second, distinct static-property-assignment idiom (`Tooltip.Arrow =
+TooltipArrow`), bumping the count from 28 to 31 -- see the alias-specific
+tests near the bottom of this file.
 """
 
 from __future__ import annotations
@@ -41,7 +48,7 @@ def repo_map():
 
 
 def test_indexes_all_functions(repo_map):
-    assert len(repo_map.list_functions()) == 28
+    assert len(repo_map.list_functions()) == 31
 
 
 def test_most_called_function_ranks_highest(repo_map):
@@ -109,8 +116,12 @@ def scratch_repo_map(tmp_path):
 def _assert_matches_full_rebuild(rm):
     """Mirrors test_repomap.py's helper of the same name: `reindex_file`'s
     incremental graph update must always match a full `build_call_graph`
-    rescan -- same nodes, same edges, same (weight, confident) per edge."""
-    fresh = build_call_graph(rm.tags_by_file)
+    rescan -- same nodes, same edges, same (weight, confident) per edge.
+    Session 105: passes `rm.aliases_by_file` too, since dashboard.tsx now
+    declares real compound-component aliases -- a fresh rebuild that omitted
+    them would disagree with `rm.graph` (built with aliases) by construction,
+    not because of a real incremental-update bug."""
+    fresh = build_call_graph(rm.tags_by_file, rm.aliases_by_file)
     assert set(rm.graph.nodes) == set(fresh.nodes)
     actual_edges = {
         (u, v): (rm.graph[u][v]["weight"], rm.graph[u][v]["confident"]) for u, v in rm.graph.edges
@@ -149,7 +160,7 @@ def test_reindex_file_leaves_line_shifted_functions_call_graph_intact(scratch_re
     # part of `NodeId`) -- exactly the case `update_call_graph_for_file`'s
     # full local reset-and-recompute (not a diff-by-name patch) needs to get
     # right without touching any other file.
-    fresh = build_call_graph(rm.tags_by_file)
+    fresh = build_call_graph(rm.tags_by_file, rm.aliases_by_file)
     assert set(rm.graph.nodes) == set(fresh.nodes)
     actual_edges = {(u, v): rm.graph[u][v]["weight"] for u, v in rm.graph.edges}
     fresh_edges = {(u, v): fresh[u][v]["weight"] for u, v in fresh.edges}
@@ -198,11 +209,14 @@ def test_jsx_component_usage_is_a_captured_caller(repo_map):
 
 
 def test_jsx_namespaced_usage_resolves_to_root_identifier(repo_map):
-    """`<Menu.Item />` resolves to `Menu` (the root/object identifier of the
-    member expression), not `Item` -- this session's documented decision."""
-    menu = next(n for n in repo_map.list_functions() if n[1] == "Menu")
-    ctx = repo_map.get_function_context(*menu)
-    assert {(c.rel_fname, c.name) for c in ctx.callers} == {("dashboard.tsx", "Dashboard")}
+    """`<Menu.Item />` resolves to "Menu" (the root/object identifier of the
+    member expression), not "Item" -- session 78's documented decision,
+    unaffected by session 105's alias work below (the JSX-capture step still
+    only ever produces a reference literally named "Menu")."""
+    dashboard_tags = repo_map.tags_by_file["dashboard.tsx"]
+    ref_names = [t.name for t in dashboard_tags if t.kind == "ref" and t.capture_kind == "jsx"]
+    assert "Menu" in ref_names
+    assert "Item" not in ref_names
 
 
 def test_jsx_lowercase_host_element_produces_no_reference_tag(repo_map):
@@ -214,8 +228,8 @@ def test_jsx_lowercase_host_element_produces_no_reference_tag(repo_map):
     dashboard_tags = repo_map.tags_by_file["dashboard.tsx"]
     ref_names = {t.name for t in dashboard_tags if t.kind == "ref"}
     assert "div" not in ref_names
-    assert "span" not in ref_names  # UserBadge's own host element, same check
-    assert "nav" not in ref_names  # Menu's own host element, same check
+    assert "span" not in ref_names  # UserBadge's/MenuItem's own host element, same check
+    assert "nav" not in ref_names  # MenuRoot's own host element, same check
 
 
 # Session 79: session 44's ambiguous-name `confident` filter was built and
@@ -292,4 +306,156 @@ def test_jsx_sourced_ambiguous_caller_prefers_same_file_definition(scratch_repo_
     after = {(c.rel_fname, c.name) for c in rm.get_function_context(*dashboard).callees}
     assert ("dashboard.tsx", "UserBadge") in after
     assert ("other_badge.tsx", "UserBadge") not in after
+    _assert_matches_full_rebuild(rm)
+
+
+# Session 105: real-fixture confirmation of the compound-component alias fix
+# (session 77's confirmed, carried-forward "compound-component exports
+# vanish entirely" definition-side finding), against dashboard.tsx's real
+# `Object.assign`/static-property idioms rather than only synthetic
+# snippets (see test_compound_component_aliases.py for those).
+
+
+def test_object_assign_alias_resolves_jsx_usage_to_real_definition(repo_map):
+    """`const Menu = Object.assign(MenuRoot, {Item: MenuItem})` must not
+    swallow `<Menu.Item />`'s usage the way it did before this session --
+    "Menu" (the JSX reference's root identifier, session 78) now resolves
+    *through* the alias to `MenuRoot`'s own definition."""
+    menu_root = next(n for n in repo_map.list_functions() if n[1] == "MenuRoot")
+    ctx = repo_map.get_function_context(*menu_root)
+    assert {(c.rel_fname, c.name) for c in ctx.callers} == {("dashboard.tsx", "Dashboard")}
+
+
+def test_object_assign_second_argument_pairs_are_not_separately_aliased(repo_map):
+    """Deliberate scope cut (see js_ts_aliases.scm's header): only the
+    declared name (`Menu`) and the first `Object.assign` argument
+    (`MenuRoot`) become an alias pair -- the object literal's own `Item:
+    MenuItem` pair does not also alias "Item" to `MenuItem`, since nothing
+    in this fixture (or JSX's own root-identifier-only resolution) ever
+    references "Item" as a name to resolve."""
+    menu_item = next(n for n in repo_map.list_functions() if n[1] == "MenuItem")
+    ctx = repo_map.get_function_context(*menu_item)
+    assert ctx.callers == []
+
+
+def test_static_property_assignment_alias_resolves_plain_call(repo_map):
+    """`Tooltip.Arrow = TooltipArrow` (assigning an already-declared function
+    reference to a static property, as opposed to `Object.assign`'s
+    two-argument call form) must let a plain `Tooltip.Arrow()` call resolve
+    to `TooltipArrow`'s own definition."""
+    tooltip_arrow = next(n for n in repo_map.list_functions() if n[1] == "TooltipArrow")
+    ctx = repo_map.get_function_context(*tooltip_arrow)
+    assert {(c.rel_fname, c.name) for c in ctx.callers} == {("dashboard.tsx", "Dashboard")}
+
+
+def test_static_property_assignment_does_not_shadow_existing_function_def_pattern(repo_map):
+    """`Tooltip` itself is defined the ordinary way (`function Tooltip(...)
+    {...}`, matching the pre-existing `@definition.function` pattern) --
+    confirms the new alias patterns in js_ts_aliases.scm don't interfere
+    with or double-capture an unrelated, already-working definition shape
+    that happens to share the same file."""
+    next(n for n in repo_map.list_functions() if n[1] == "Tooltip")  # raises if absent
+    dashboard_tags = repo_map.tags_by_file["dashboard.tsx"]
+    tooltip_defs = [t for t in dashboard_tags if t.kind == "def" and t.name == "Tooltip"]
+    assert len(tooltip_defs) == 1
+
+
+def test_reindex_file_moving_alias_target_within_its_own_file_updates_edge(scratch_repo_map):
+    """`MenuRoot` (the alias's target) shifting lines within dashboard.tsx,
+    with `Menu`'s alias declaration itself untouched, is the incremental
+    (not full-reindex-fallback) path -- confirms `update_call_graph_for_file`'s
+    `alias_reverse` extension correctly re-wires the JSX-sourced "Menu" edge
+    onto MenuRoot's new node id without a full `index()`."""
+    rm, scratch_root = scratch_repo_map
+    dashboard_path = scratch_root / "dashboard.tsx"
+    original = dashboard_path.read_text(encoding="utf-8")
+    mutated = original.replace(
+        "function MenuRoot(props: { children?: JSX.Element }): JSX.Element {\n",
+        "// an extra line, pushing MenuRoot's own declaration (and its node id) down one line\n"
+        "function MenuRoot(props: { children?: JSX.Element }): JSX.Element {\n",
+    )
+    assert mutated != original, "fixture source didn't match the expected MenuRoot header -- update the test"
+    dashboard_path.write_text(mutated, encoding="utf-8")
+
+    before_aliases = rm.aliases_by_file.get("dashboard.tsx", [])
+    rm.reindex_file("dashboard.tsx")
+    # This file's own alias set is unchanged -- confirms the fast
+    # incremental path ran, not the full-index fallback.
+    assert rm.aliases_by_file.get("dashboard.tsx", []) == before_aliases
+
+    menu_root = next(n for n in rm.list_functions() if n[1] == "MenuRoot")
+    ctx = rm.get_function_context(*menu_root)
+    assert {(c.rel_fname, c.name) for c in ctx.callers} == {("dashboard.tsx", "Dashboard")}
+    _assert_matches_full_rebuild(rm)
+
+
+def test_reindex_file_removing_alias_declaration_falls_back_to_full_index(scratch_repo_map):
+    """Removing `Menu`'s alias declaration entirely (while `<Menu.Item />`'s
+    usage inside `Dashboard`, in the *same* file, is removed too, so there's
+    no cross-file staleness in this particular edit) must still take
+    `reindex_file`'s documented full-`index()` fallback path -- confirmed
+    directly (not just via the resulting graph) by checking `MenuRoot` no
+    longer shows Dashboard as a caller and the graph still matches a fresh
+    full rebuild."""
+    rm, scratch_root = scratch_repo_map
+    dashboard_path = scratch_root / "dashboard.tsx"
+    original = dashboard_path.read_text(encoding="utf-8")
+    mutated = original.replace(
+        "const Menu = Object.assign(MenuRoot, { Item: MenuItem });\n", ""
+    ).replace("      <Menu.Item />\n", "")
+    assert mutated != original, "fixture source didn't match the expected Menu alias declaration -- update the test"
+    dashboard_path.write_text(mutated, encoding="utf-8")
+
+    rm.reindex_file("dashboard.tsx")
+
+    assert "Menu" not in rm.alias_targets
+    menu_root = next(n for n in rm.list_functions() if n[1] == "MenuRoot")
+    ctx = rm.get_function_context(*menu_root)
+    assert ctx.callers == []
+    _assert_matches_full_rebuild(rm)
+
+
+def test_reindex_file_alias_target_becoming_ambiguous_elsewhere_flips_confidence(scratch_repo_map):
+    """Code-review finding (Session 105): the confidence-recompute loop's
+    `alias_reverse` extension (graph.py) is the only thing that can find and
+    re-check an *alias-sourced* edge when the alias's *target* name becomes
+    ambiguous via a THIRD file's reindex -- the ref that sourced the edge is
+    literally named "Widget", never "Base", so without `alias_reverse`
+    mapping "Base" back to "Widget", `refs_by_name.get("Base")` alone would
+    never find it and the edge would incorrectly stay confident forever.
+    """
+    rm, scratch_root = scratch_repo_map
+
+    (scratch_root / "alias_owner.tsx").write_text(
+        "function Base(): JSX.Element {\n  return <span />;\n}\n"
+        "const Widget = Object.assign(Base, {});\n",
+        encoding="utf-8",
+    )
+    rm.reindex_file("alias_owner.tsx")
+
+    (scratch_root / "widget_user.tsx").write_text(
+        "export function WidgetUser(): JSX.Element {\n  return <Widget />;\n}\n",
+        encoding="utf-8",
+    )
+    rm.reindex_file("widget_user.tsx")
+
+    widget_user = next(n for n in rm.list_functions() if n[1] == "WidgetUser")
+    before = {(c.rel_fname, c.name) for c in rm.get_function_context(*widget_user).callees}
+    assert ("alias_owner.tsx", "Base") in before  # unambiguous so far -- confident
+    _assert_matches_full_rebuild(rm)
+
+    # A second, unrelated "Base" in a third file -- neither alias_owner.tsx
+    # (the alias's own file) nor widget_user.tsx (the ref's own file).
+    (scratch_root / "base_two.tsx").write_text(
+        "export function Base(): void {}\n",
+        encoding="utf-8",
+    )
+    rm.reindex_file("base_two.tsx")
+
+    after = {(c.rel_fname, c.name) for c in rm.get_function_context(*widget_user).callees}
+    assert not any(name == "Base" for _, name in after)
+
+    graph_callees = {n[:2] for n in rm.graph.successors(widget_user)}
+    assert ("alias_owner.tsx", "Base") in graph_callees
+    assert ("base_two.tsx", "Base") in graph_callees
     _assert_matches_full_rebuild(rm)

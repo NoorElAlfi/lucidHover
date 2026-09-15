@@ -14,8 +14,15 @@ import os
 from dataclasses import dataclass, field
 
 from ..concurrency import RWLock
-from .extraction import Tag, extract_tags, extract_tags_for_repo
-from .graph import NodeId, build_call_graph, build_indices, update_call_graph_for_file
+from .extraction import (
+    Alias,
+    Tag,
+    extract_aliases,
+    extract_aliases_for_repo,
+    extract_tags,
+    extract_tags_for_repo,
+)
+from .graph import NodeId, build_alias_targets, build_call_graph, build_indices, update_call_graph_for_file
 from .rank import compute_importance
 
 CALLER_CALLEE_CAP = 15
@@ -185,6 +192,13 @@ class RepoMap:
         self.defs_by_name: dict[str, list[Tag]] = {}
         self.defs_by_file: dict[str, list[Tag]] = {}
         self.refs_by_name: dict[str, list[Tag]] = {}
+        # Session 105: `aliases_by_file` (rel_fname -> that file's own
+        # compound-component aliases, only present for files that have any)
+        # and `alias_targets` (the repo-wide `name -> [target_name, ...]`
+        # index `build_alias_targets` derives from it) -- see graph.py's
+        # module docstring for what these are for.
+        self.aliases_by_file: dict[str, list[Alias]] = {}
+        self.alias_targets: dict[str, list[str]] = {}
         # Guards concurrent access to the mutable attributes above -- see
         # sidecar/concurrency.py's module docstring (session 37). Held by
         # callers (rpc_server.py's handlers), not by this class's own
@@ -194,8 +208,10 @@ class RepoMap:
 
     def index(self) -> None:
         self.tags_by_file = extract_tags_for_repo(self.root)
-        self.graph = build_call_graph(self.tags_by_file)
+        self.aliases_by_file = extract_aliases_for_repo(self.root)
+        self.graph = build_call_graph(self.tags_by_file, self.aliases_by_file)
         self.defs_by_name, self.defs_by_file, self.refs_by_name = build_indices(self.tags_by_file)
+        self.alias_targets = build_alias_targets(self.aliases_by_file)
         self.importance = compute_importance(self.graph)
 
     def reindex_file(self, rel_fname: str) -> int:
@@ -218,14 +234,29 @@ class RepoMap:
         here; the graph-rebuild share it was paired with is the part this
         session's incremental update actually removes.
 
+        Session 105: if `rel_fname`'s own compound-component alias
+        declarations changed (an alias added, removed, or retargeted --
+        e.g. `const Menu = Object.assign(...)` edited or deleted), this
+        falls back to a full `index()` instead of patching incrementally,
+        the same escape hatch this method already uses when `self.graph is
+        None`. Reason: an alias's *target* can be resolved from a
+        completely different, unreindexed file's reference (`<Menu>` in
+        file C, aliased via file A) -- `update_call_graph_for_file` has no
+        safe way to find and drop/rewrite just that one file's now-stale
+        edge without rescanning every ref of that name repo-wide, which is
+        exactly what a full index already does. This is the rare case: most
+        reindexes touch no alias at all, and take the fast incremental path
+        below unchanged.
+
         Returns the number of functions now indexed for `rel_fname`.
         """
         if self.graph is None:
             # `index()` was never called first, so `defs_by_name`/
-            # `refs_by_name`/`defs_by_file` were never populated for the
-            # rest of the repo. Building the incremental update on top of
-            # that would silently scope them to just this one file instead
-            # of the whole repo -- do a real full index instead.
+            # `refs_by_name`/`defs_by_file`/`alias_targets` were never
+            # populated for the rest of the repo. Building the incremental
+            # update on top of that would silently scope them to just this
+            # one file instead of the whole repo -- do a real full index
+            # instead.
             self.index()
             return sum(1 for t in self.tags_by_file.get(rel_fname, []) if t.kind == "def")
 
@@ -233,10 +264,16 @@ class RepoMap:
         old_tags = self.tags_by_file.get(rel_fname, [])
         old_defs = [t for t in old_tags if t.kind == "def"]
         old_refs = [t for t in old_tags if t.kind == "ref"]
+        old_aliases = self.aliases_by_file.get(rel_fname, [])
 
         new_tags = extract_tags(fname, rel_fname)
         new_defs = [t for t in new_tags if t.kind == "def"]
         new_refs = [t for t in new_tags if t.kind == "ref"]
+        new_aliases = extract_aliases(fname, rel_fname)
+
+        if new_aliases != old_aliases:
+            self.index()
+            return sum(1 for tag in new_defs if tag.kind == "def")
 
         self.tags_by_file[rel_fname] = new_tags
         update_call_graph_for_file(
@@ -244,6 +281,7 @@ class RepoMap:
             self.defs_by_name,
             self.defs_by_file,
             self.refs_by_name,
+            self.alias_targets,
             rel_fname,
             old_defs,
             old_refs,

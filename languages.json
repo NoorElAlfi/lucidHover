@@ -8,6 +8,7 @@
       "grammarFunction": "language"
     },
     "tagQueryFile": "javascript_tags.scm",
+    "aliasQueryFile": "js_ts_aliases.scm",
     "exclusions": {
       "dirs": ["node_modules", "out", "dist", "build"],
       "defNames": ["constructor"],
@@ -31,6 +32,7 @@
       "grammarFunction": "language_typescript"
     },
     "tagQueryFile": "typescript_tags.scm",
+    "aliasQueryFile": "js_ts_aliases.scm",
     "exclusions": {
       "dirs": ["node_modules", "out", "dist", "build"],
       "defNames": ["constructor"],
@@ -52,6 +54,7 @@
       "grammarFunction": "language_tsx"
     },
     "tagQueryFile": "typescript_tsx_tags.scm",
+    "aliasQueryFile": "js_ts_aliases.scm",
     "exclusions": {
       "dirs": ["node_modules", "out", "dist", "build"],
       "defNames": ["constructor"],

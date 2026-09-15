@@ -28,9 +28,18 @@ from __future__ import annotations
 
 import os
 
-from .adapters import Tag, get_registry
+from .adapters import Alias, Tag, get_registry
 
-__all__ = ["Tag", "EXCLUDED_DIRS", "extract_tags", "extract_tags_for_repo", "find_source_files"]
+__all__ = [
+    "Alias",
+    "Tag",
+    "EXCLUDED_DIRS",
+    "extract_tags",
+    "extract_tags_for_repo",
+    "extract_aliases",
+    "extract_aliases_for_repo",
+    "find_source_files",
+]
 
 # Union of every registered language's excluded dirs, plus the universal
 # ones -- for v0 (JavaScript only) this was identical to the pre-Session-21
@@ -65,3 +74,31 @@ def extract_tags_for_repo(root: str) -> dict[str, list[Tag]]:
         rel_fname = os.path.relpath(fname, root).replace(os.sep, "/")
         tags_by_file[rel_fname] = extract_tags(fname, rel_fname)
     return tags_by_file
+
+
+def extract_aliases(fname: str, rel_fname: str) -> list[Alias]:
+    """
+    Session 105: extract one file's compound-component/static-property alias
+    facts, via its registered language adapter. `[]` for a language with no
+    `alias_query_file` (see `adapters/base.py`'s `LanguageManifestEntry`) or
+    a file whose adapter can't be resolved at all.
+    """
+    adapter = get_registry().adapter_for_file(fname)
+    if adapter is None:
+        return []
+    return adapter.extract_aliases(fname, rel_fname)
+
+
+def extract_aliases_for_repo(root: str) -> dict[str, list[Alias]]:
+    """Extract aliases for every registered-language file under root, keyed by relative path.
+    A file with no aliases is omitted, not given an empty list -- mirrors
+    `defs_by_name`/`refs_by_name`'s own "absent means none" convention rather
+    than `tags_by_file`'s "always present, maybe empty" one, since aliases
+    are the rare case."""
+    aliases_by_file: dict[str, list[Alias]] = {}
+    for fname in find_source_files(root):
+        rel_fname = os.path.relpath(fname, root).replace(os.sep, "/")
+        found = extract_aliases(fname, rel_fname)
+        if found:
+            aliases_by_file[rel_fname] = found
+    return aliases_by_file
