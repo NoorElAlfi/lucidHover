@@ -76,7 +76,7 @@
     },
     "tagQueryFile": "python_tags.scm",
     "exclusions": {
-      "dirs": ["__pycache__", ".venv", "venv", ".mypy_cache", ".pytest_cache", ".tox", "build", "dist"],
+      "dirs": ["__pycache__", ".venv", "venv", ".mypy_cache", ".pytest_cache", ".tox", "build", "dist", "*.egg-info"],
       "defNames": [],
       "refNames": []
     },

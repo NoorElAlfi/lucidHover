@@ -7,6 +7,7 @@ support yet is expected, not a failure.
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 from pathlib import Path
@@ -19,6 +20,13 @@ _MANIFEST_PATH = Path(__file__).resolve().parents[3] / "languages.json"
 
 # Excluded regardless of language -- every language's working tree has one.
 _UNIVERSAL_EXCLUDED_DIRS = frozenset({".git"})
+
+# Session 83 flagged `Exclusions.dirs` as exact-name-only, unable to express
+# a variable-suffix convention like Python's `*.egg-info` (e.g.
+# `mypackage.egg-info`). A dir entry containing any of these characters is
+# matched via `fnmatch` instead of `==`; entries without them (the common
+# case -- "node_modules", ".venv", etc.) stay a plain set-membership check.
+_GLOB_CHARS = frozenset("*?[")
 
 
 class LanguageRegistry:
@@ -38,6 +46,12 @@ class LanguageRegistry:
         self.excluded_dirs: frozenset[str] = _UNIVERSAL_EXCLUDED_DIRS.union(
             *(a.manifest.exclusions.dirs for a in self._adapters.values())
         )
+        self._excluded_dir_literals: frozenset[str] = frozenset(
+            d for d in self.excluded_dirs if not any(c in d for c in _GLOB_CHARS)
+        )
+        self._excluded_dir_patterns: tuple[str, ...] = tuple(
+            d for d in self.excluded_dirs if any(c in d for c in _GLOB_CHARS)
+        )
 
     def adapter_for_language(self, language_id: str) -> TreeSitterAdapter:
         return self._adapters[language_id]
@@ -52,6 +66,11 @@ class LanguageRegistry:
             return None
         return self._adapters[language_id]
 
+    def _is_dir_excluded(self, name: str) -> bool:
+        if name in self._excluded_dir_literals:
+            return True
+        return any(fnmatch.fnmatch(name, pattern) for pattern in self._excluded_dir_patterns)
+
     def discover_files(self, root: str) -> dict[str, list[str]]:
         """
         Walk `root`, dispatching each file to its adapter's language by
@@ -60,7 +79,7 @@ class LanguageRegistry:
         """
         results: dict[str, list[str]] = {language_id: [] for language_id in self._adapters}
         for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = [d for d in dirnames if d not in self.excluded_dirs]
+            dirnames[:] = [d for d in dirnames if not self._is_dir_excluded(d)]
             for name in filenames:
                 language_id = self.language_for_file(name)
                 if language_id is not None:
