@@ -26,7 +26,9 @@ import * as sinon from 'sinon';
 import * as vscode from 'vscode';
 import { EMBEDDING_MODEL_ID, PROMPT_VERSION, resolveModelId } from '../../cache/config';
 import { CacheRow, ExplanationCache } from '../../cache/explanationCache';
+import { DirtyTracker } from '../../dirtyTracking';
 import { resolveEnclosingFunction, ResolvedFunction } from '../../functionResolution';
+import { StaleTracker } from '../../staleTracking';
 // Session 61: imported as a namespace (alongside the named import above) so
 // its `resolveEnclosingFunction` can be sinon-stubbed on the shared CommonJS
 // exports object -- explanationPanelProvider.ts calls it via
@@ -917,5 +919,315 @@ suite('panel/explanationPanelProvider refreshFor sequencing (Session 61)', () =>
             ['renderGraph'],
             'expected only the showGraph pin to post a message -- the in-flight refreshFor(alpha) must be invalidated, not allowed to post a render/empty message on top of the pinned graph'
         );
+    });
+});
+
+/**
+ * Session 99: freshness-badge state-transition coverage for the docked
+ * panel's single-explanation view. This wiring itself is NOT new -- tracing
+ * the code found `ExplanationPanelProvider` already takes real
+ * `DirtyTracker`/`StaleTracker` getters (constructor, above), already
+ * computes `freshnessOf(dirty, stale)` in `postRow`, and already renders a
+ * fresh/dirty/stale-specific footer message in the webview script (added by
+ * Session 58's card redesign while porting the design doc's P7 stale
+ * indicator -- see that function's own doc comments) -- all wired into
+ * production via real trackers in `extension.ts`. Session 55's "the panel
+ * has no freshness indicator" finding, and this session's own brief (which
+ * repeated it), no longer hold.
+ *
+ * What actually had zero coverage: the freshness *state itself* -- every
+ * existing suite above constructs the panel with `() => undefined, () =>
+ * undefined` for the tracker getters, so no test ever observed a 'dirty' or
+ * 'stale' render. These tests use real `DirtyTracker`/`StaleTracker`
+ * instances (mirroring `saveReindexIntegration.test.ts`'s own
+ * `new StaleTracker()` precedent) and assert on the `render` message's
+ * `freshness` field -- the same message-args-only assertion style every
+ * other test in this file uses, since this harness has no real webview
+ * iframe to inspect DOM/CSS state in (see this file's own header comment).
+ * `dirty` is produced via a real, unsaved `TextEditor.edit` inside the
+ * displayed function's body (the only way to set it -- `DirtyTracker.
+ * markDirty` is private, driven only by a real `onDidChangeTextDocument`
+ * event), matching `functionHoverProvider.ts`'s `freshnessOf` precedence
+ * (dirty over stale) that this panel's own `freshnessOf` mirrors exactly.
+ */
+suite('panel/explanationPanelProvider freshness badge (Session 99)', () => {
+    let tempDir: string;
+    let output: vscode.OutputChannel;
+    let sandbox: sinon.SinonSandbox;
+    let cache: ExplanationCache;
+    let dirtyTracker: DirtyTracker;
+    let staleTracker: StaleTracker;
+    let panel: ExplanationPanelProvider;
+
+    async function waitForSymbols(document: vscode.TextDocument): Promise<void> {
+        for (let attempt = 0; attempt < 40; attempt++) {
+            const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
+                'vscode.executeDocumentSymbolProvider',
+                document.uri
+            );
+            if (symbols && symbols.length > 0) {
+                return;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+        assert.fail(`document symbol provider never returned symbols for ${document.uri.fsPath}`);
+    }
+
+    const targetContent = 'function target() {\n  return 1;\n}\n\nfunction other() {\n  return 2;\n}\n';
+
+    suiteSetup(async function () {
+        this.timeout(30_000);
+        tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lucidhover-panel-freshness-'));
+        fs.writeFileSync(path.join(tempDir, 'target.js'), targetContent, 'utf8');
+        output = vscode.window.createOutputChannel('LucidHover Panel Freshness Test');
+    });
+
+    suiteTeardown(function () {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+    });
+
+    setup(() => {
+        sandbox = sinon.createSandbox();
+        const dbPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'lucidhover-panel-freshness-cache-')), 'cache.sqlite');
+        cache = new ExplanationCache(dbPath);
+        dirtyTracker = new DirtyTracker(() => tempDir, output);
+        staleTracker = new StaleTracker();
+        panel = new ExplanationPanelProvider(
+            vscode.Uri.file(tempDir),
+            () => tempDir,
+            () => cache,
+            () => dirtyTracker,
+            () => staleTracker,
+            output
+        );
+    });
+
+    teardown(() => {
+        cache.dispose();
+        dirtyTracker.dispose();
+        staleTracker.dispose();
+        sandbox.restore();
+    });
+
+    function cacheRowFor(resolved: ResolvedFunction, cacheKey: string): CacheRow {
+        return {
+            cache_key: cacheKey,
+            fn_id: resolved.fnId,
+            explanation_json: JSON.stringify({ role_tag: 'utility', one_liner: 'test' }),
+            fn_hash: resolved.fnHash,
+            context_hash: 'ctx',
+            model_id: resolveModelId(),
+            embedding_model_id: EMBEDDING_MODEL_ID,
+            prompt_version: PROMPT_VERSION,
+            context_tier: 'call_graph_only',
+            generated_at: new Date().toISOString(),
+        };
+    }
+
+    function latestRenderFor(fakeView: ReturnType<typeof createFakeWebviewView>, fnName: string) {
+        return fakeView.webview.postMessage
+            .getCalls()
+            .reverse()
+            .find((c) => c.args[0]?.type === 'render' && c.args[0]?.fnName === fnName);
+    }
+
+    /**
+     * Marks `target()` dirty via a real, unsaved edit inside its body,
+     * without changing its *content* -- an insert immediately followed by
+     * deleting exactly what was inserted, leaving the document byte-for-byte
+     * identical to before. This matters because `fn_hash` (functionResolution.ts's
+     * `toResolvedFunction`) always hashes the *current live buffer text*, not
+     * the last-saved-to-disk text: a real net content change would give the
+     * re-resolved function a different `fn_hash` than whatever was cached
+     * before the edit, so `cache.lookup` would genuinely miss and the panel
+     * would (correctly, per Core Rule 4 -- it never generates) show its
+     * empty state, not a "dirty" row. `DirtyTracker` has no such
+     * content-comparison of its own (it marks dirty on any change whose
+     * position falls within the function's range, including the revert
+     * half of this pair, and never un-marks itself when an edit is undone),
+     * so this reproduces the real, reachable production case where dirty
+     * stays set even though the live text still matches what's cached (e.g.
+     * a user types something, then undoes it, before saving).
+     */
+    async function touchWithoutChangingContent(editor: vscode.TextEditor): Promise<void> {
+        const insertPos = new vscode.Position(1, 2);
+        await editor.edit((editBuilder) => {
+            editBuilder.insert(insertPos, 'x');
+        });
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        await editor.edit((editBuilder) => {
+            editBuilder.delete(new vscode.Range(insertPos, insertPos.translate(0, 1)));
+        });
+        await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+
+    test('a cached function with no dirty or stale state renders freshness "fresh"', async () => {
+        const document = await vscode.workspace.openTextDocument(path.join(tempDir, 'target.js'));
+        await waitForSymbols(document);
+        const editor = await vscode.window.showTextDocument(document);
+        const resolved = await resolveEnclosingFunction(document, new vscode.Position(0, 10), tempDir);
+        assert.ok(resolved, 'expected to resolve target()');
+        cache.write(cacheRowFor(resolved!, 'test-key-fresh'));
+
+        const fakeView = createFakeWebviewView();
+        panel.resolveWebviewView(fakeView as unknown as vscode.WebviewView);
+
+        editor.selection = new vscode.Selection(resolved!.range.start, resolved!.range.start);
+        panel.onSelectionChanged(editor);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        const renderCall = latestRenderFor(fakeView, 'target');
+        assert.ok(renderCall, 'expected a render message for target()');
+        assert.strictEqual(renderCall!.args[0].freshness, 'fresh');
+    });
+
+    test('an unsaved in-memory edit to the displayed function renders freshness "dirty"', async () => {
+        const document = await vscode.workspace.openTextDocument(path.join(tempDir, 'target.js'));
+        await waitForSymbols(document);
+        const editor = await vscode.window.showTextDocument(document);
+        const resolved = await resolveEnclosingFunction(document, new vscode.Position(0, 10), tempDir);
+        assert.ok(resolved, 'expected to resolve target()');
+        cache.write(cacheRowFor(resolved!, 'test-key-dirty'));
+
+        const fakeView = createFakeWebviewView();
+        panel.resolveWebviewView(fakeView as unknown as vscode.WebviewView);
+
+        editor.selection = new vscode.Selection(resolved!.range.start, resolved!.range.start);
+        panel.onSelectionChanged(editor);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        assert.strictEqual(latestRenderFor(fakeView, 'target')!.args[0].freshness, 'fresh');
+
+        await touchWithoutChangingContent(editor);
+
+        fakeView.webview.postMessage.resetHistory();
+        panel.onSelectionChanged(editor);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        const renderCall = latestRenderFor(fakeView, 'target');
+        assert.ok(renderCall, 'expected a render message for target() after the edit');
+        assert.strictEqual(renderCall!.args[0].freshness, 'dirty');
+    });
+
+    test('a StaleTracker flag on the displayed function renders freshness "stale" with no edit involved', async () => {
+        const document = await vscode.workspace.openTextDocument(path.join(tempDir, 'target.js'));
+        await waitForSymbols(document);
+        const editor = await vscode.window.showTextDocument(document);
+        const resolved = await resolveEnclosingFunction(document, new vscode.Position(0, 10), tempDir);
+        assert.ok(resolved, 'expected to resolve target()');
+        cache.write(cacheRowFor(resolved!, 'test-key-stale'));
+
+        staleTracker.markStale(resolved!.relFile, resolved!.fnId);
+
+        const fakeView = createFakeWebviewView();
+        panel.resolveWebviewView(fakeView as unknown as vscode.WebviewView);
+
+        editor.selection = new vscode.Selection(resolved!.range.start, resolved!.range.start);
+        panel.onSelectionChanged(editor);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        const renderCall = latestRenderFor(fakeView, 'target');
+        assert.ok(renderCall, 'expected a render message for target()');
+        assert.strictEqual(renderCall!.args[0].freshness, 'stale');
+    });
+
+    test('dirty takes precedence over stale when both apply to the same function, matching functionHoverProvider\'s freshnessOf', async () => {
+        const document = await vscode.workspace.openTextDocument(path.join(tempDir, 'target.js'));
+        await waitForSymbols(document);
+        const editor = await vscode.window.showTextDocument(document);
+        const resolved = await resolveEnclosingFunction(document, new vscode.Position(0, 10), tempDir);
+        assert.ok(resolved, 'expected to resolve target()');
+        cache.write(cacheRowFor(resolved!, 'test-key-both'));
+
+        staleTracker.markStale(resolved!.relFile, resolved!.fnId);
+
+        const fakeView = createFakeWebviewView();
+        panel.resolveWebviewView(fakeView as unknown as vscode.WebviewView);
+
+        editor.selection = new vscode.Selection(resolved!.range.start, resolved!.range.start);
+        panel.onSelectionChanged(editor);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        assert.strictEqual(latestRenderFor(fakeView, 'target')!.args[0].freshness, 'stale');
+
+        await touchWithoutChangingContent(editor);
+
+        fakeView.webview.postMessage.resetHistory();
+        panel.onSelectionChanged(editor);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        const renderCall = latestRenderFor(fakeView, 'target');
+        assert.ok(renderCall, 'expected a render message for target() after both flags apply');
+        assert.strictEqual(
+            renderCall!.args[0].freshness,
+            'dirty',
+            'expected dirty to take precedence over stale, even though the stale flag was never cleared'
+        );
+    });
+
+    test('clearing the dirty flag (as save/refresh triggers do) reverts freshness to fresh when nothing is stale', async () => {
+        const document = await vscode.workspace.openTextDocument(path.join(tempDir, 'target.js'));
+        await waitForSymbols(document);
+        const editor = await vscode.window.showTextDocument(document);
+        const resolved = await resolveEnclosingFunction(document, new vscode.Position(0, 10), tempDir);
+        assert.ok(resolved, 'expected to resolve target()');
+        cache.write(cacheRowFor(resolved!, 'test-key-clear-dirty'));
+
+        const fakeView = createFakeWebviewView();
+        panel.resolveWebviewView(fakeView as unknown as vscode.WebviewView);
+
+        editor.selection = new vscode.Selection(resolved!.range.start, resolved!.range.start);
+        panel.onSelectionChanged(editor);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        await touchWithoutChangingContent(editor);
+
+        fakeView.webview.postMessage.resetHistory();
+        panel.onSelectionChanged(editor);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        assert.strictEqual(latestRenderFor(fakeView, 'target')!.args[0].freshness, 'dirty');
+
+        // Same clearing action refreshExplanationCommand.ts/the three
+        // reindex triggers already take on a successful regeneration --
+        // clear the fnId's dirty flag directly rather than round-tripping
+        // through a real save (which would also invoke the real activated
+        // extension's own SaveReindexManager against a real sidecar, unlike
+        // every other assertion in this suite).
+        dirtyTracker.clearFnId(resolved!.relFile, resolved!.fnId);
+
+        fakeView.webview.postMessage.resetHistory();
+        panel.onSelectionChanged(editor);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        const renderCall = latestRenderFor(fakeView, 'target');
+        assert.ok(renderCall, 'expected a render message for target() after clearing dirty');
+        assert.strictEqual(renderCall!.args[0].freshness, 'fresh');
+    });
+
+    test('clearing the stale flag (as a regeneration does) reverts freshness to fresh', async () => {
+        const document = await vscode.workspace.openTextDocument(path.join(tempDir, 'target.js'));
+        await waitForSymbols(document);
+        const editor = await vscode.window.showTextDocument(document);
+        const resolved = await resolveEnclosingFunction(document, new vscode.Position(0, 10), tempDir);
+        assert.ok(resolved, 'expected to resolve target()');
+        cache.write(cacheRowFor(resolved!, 'test-key-clear-stale'));
+
+        staleTracker.markStale(resolved!.relFile, resolved!.fnId);
+
+        const fakeView = createFakeWebviewView();
+        panel.resolveWebviewView(fakeView as unknown as vscode.WebviewView);
+
+        editor.selection = new vscode.Selection(resolved!.range.start, resolved!.range.start);
+        panel.onSelectionChanged(editor);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        assert.strictEqual(latestRenderFor(fakeView, 'target')!.args[0].freshness, 'stale');
+
+        staleTracker.clearFnId(resolved!.relFile, resolved!.fnId);
+
+        fakeView.webview.postMessage.resetHistory();
+        panel.onSelectionChanged(editor);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        const renderCall = latestRenderFor(fakeView, 'target');
+        assert.ok(renderCall, 'expected a render message for target() after clearing stale');
+        assert.strictEqual(renderCall!.args[0].freshness, 'fresh');
     });
 });
