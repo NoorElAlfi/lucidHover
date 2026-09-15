@@ -28,6 +28,15 @@ another engineer who has never seen it. You are given the function's source, plu
 its actual known callers and callees from the codebase's call graph.
 
 Field rules -- follow exactly:
+- Never infer what a function does from its own name alone -- a name can promise behavior the \
+body doesn't actually have (e.g. a function called "get_cached_value" with no cache logic, or a \
+decorator called "logged"/"traced" whose body never calls a logging function). This caution only \
+applies when nothing in the given body or callees confirms the named behavior: if the function's \
+own body actually does the thing its name suggests (e.g. it genuinely calls a logging function), \
+that's real, verifiable evidence from the source, not a name-based guess -- describe it normally, \
+don't doubt it just because a name-vs-behavior mismatch is possible in general. Every claim in \
+one_liner, why_it_exists, and side_effects must be verifiable from the real body and the given \
+callers/callees, never from what the name alone suggests when nothing else backs it up.
 - role_tag: a short (1-3 word) category for what kind of function this is (e.g. "Handler", \
 "Validator", "Utility", "Persistence", "Middleware", "Worker").
 - one_liner: exactly one sentence, plain language, no jargon dump.
@@ -48,10 +57,13 @@ of thing to look for, not fixed text to output -- never copy it verbatim into yo
 each entry in what this specific function's code does. How many callers a function has, or how \
 important it looks in the codebase, says nothing about whether it has side effects -- a \
 heavily-used function can be perfectly pure; judge this only from what the function's own body \
-actually does, never from its caller count or ranking. Every distinct effect you find is its own \
-array element -- if the function has three effects, output three separate strings, never one \
-string joining them together with commas. Empty array if none -- never invent one, and never list \
-a category just because it was mentioned above if this function doesn't actually do it.
+actually does, never from its caller count or ranking. A function whose only verified effect is a \
+call to a plain logging/printing utility has exactly one side effect: a logged/printed message -- \
+name only that, and only claim a different kind of effect when the given source actually shows \
+it doing that other thing. Every distinct effect you find is its own array element -- if the \
+function has three effects, output three separate strings, never one string joining them \
+together with commas. Empty array if none -- never invent one, and never list a category just \
+because it was mentioned above if this function doesn't actually do it.
 - risk_note: only a genuine correctness/safety concern visible from the given source and \
 callers/callees (e.g. a caller that skips a check this function relies on). null if none -- do \
 not speculate or manufacture a risk to fill the field.
@@ -320,7 +332,40 @@ _EXAMPLE_5 = FewShotExample(
     },
 )
 
-FEW_SHOT_EXAMPLES = [_EXAMPLE_1, _EXAMPLE_2, _EXAMPLE_3, _EXAMPLE_4, _EXAMPLE_5]
+_EXAMPLE_6 = FewShotExample(
+    fn_source=(
+        "function traced(fn) {\n"
+        "  return function wrapped(...args) {\n"
+        "    return fn(...args);\n"
+        "  };\n"
+        "}"
+    ),
+    caller_names=[],
+    callee_names=[],
+    context_bundle="Callers (0): none\nCallees (0): none",
+    reasoning=(
+        "No callers or callees are given, so I'll judge this only from its own body. Despite being "
+        "named 'traced', the body has no logging call, no console output, and no other effect -- it "
+        "just forwards its arguments to the wrapped function unchanged. A name isn't evidence by "
+        "itself; only the body is."
+    ),
+    explanation={
+        "role_tag": "Utility",
+        "one_liner": "A decorator that returns a new function forwarding all arguments to the wrapped function unchanged.",
+        "why_it_exists": (
+            "No callers or callees were provided for this function, so its role in the wider "
+            "codebase can't be determined here -- despite being named 'traced', the body shows no "
+            "actual logging or tracing; it's a plain pass-through wrapper around whatever function "
+            "it decorates."
+        ),
+        "used_by": [],
+        "calls": [],
+        "side_effects": [],
+        "risk_note": None,
+    },
+)
+
+FEW_SHOT_EXAMPLES = [_EXAMPLE_1, _EXAMPLE_2, _EXAMPLE_3, _EXAMPLE_4, _EXAMPLE_5, _EXAMPLE_6]
 
 
 TOP_K_HIGHLIGHT = 3

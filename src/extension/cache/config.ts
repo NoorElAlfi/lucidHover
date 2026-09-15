@@ -139,8 +139,54 @@ export const EMBEDDING_MODEL_ID = 'all-minilm';
  * writing a file", "sending a message or notification", "mutating a
  * parameter or global") into the answer instead of grounding effects in the
  * function's actual body.
+ *
+ * `few-shot-v6` (was `few-shot-v5`, Session 96): closes two hallucination
+ * classes session 92's Python validation pass surfaced (one new, one a
+ * carried-forward residual of session 42's own fix): (1) a new general field
+ * rule -- "never infer what a function does from its own name alone,
+ * scoped to only apply when nothing in the body/callees confirms the named
+ * behavior" -- for the base-model naming-bias finding (Python fixture's
+ * `traced`, a no-op pass-through decorator, hallucinated as "adds logging"
+ * purely from its name, confirmed via `grep -i "decorat" prompt.py` to not
+ * be a few-shot leak); (2) a reworded `side_effects` rule addendum -- a
+ * function whose only verified effect is a plain logging/printing call has
+ * exactly one side effect, a logged/printed message, not file I/O or
+ * messaging -- for the residual verbatim-category-copy case where a
+ * function has exactly one real, grounded effect (a log call) but the model
+ * still padded in unrelated categories from the field rule's own example
+ * list (Python fixture's `find_user_by_email`). One new few-shot example
+ * (`_EXAMPLE_6`, an isolated no-op decorator literally named "traced",
+ * chosen over a synonym after live testing showed the model's naming bias
+ * is tied to that specific word) demonstrates the naming-bias pattern.
+ *
+ * Two live-tested false starts, discarded before landing on the above:
+ * a second candidate example (a single-log-effect case with a fictional
+ * caller "resolveSetting") fixed `find_user_by_email` but caused a worse
+ * regression -- the model echoed its fictional caller name and "caching"
+ * framing verbatim into `traced`'s own (correctly caller-less) explanation
+ * -- so it was dropped once the field-rule wording alone proved sufficient
+ * for `find_user_by_email`. Separately, the side_effects addendum's first
+ * draft repeated the exact illustrative phrases ("reading/writing a file",
+ * "sending a message/notification") from the rule above it, even though
+ * negated ("do not also list it as X") -- this made those exact phrases
+ * appear twice in the prompt and measurably caused *new* verbatim-copy
+ * hallucinations on functions that never triggered it before (JS fixture's
+ * `handleLoginRoute`, Python fixture's `validate_email`) -- fixed by
+ * rewording the addendum to never repeat those phrases at all.
+ *
+ * Also discovered, live-tested (git-stash A/B), and deliberately NOT fixed
+ * here (flagged as a separate follow-up, out of scope for a prompt-wording
+ * session): a pre-existing Ollama resource-exhaustion bug where enough
+ * sustained back-to-back `generate_explanation` calls against the same
+ * loaded model instance eventually stall until the client's 120s timeout.
+ * This session's longer prompt measurably brings the failure point sooner
+ * (baseline survives a real 28-function/56-request run with no stall;
+ * field-rule-wording-only fails at function 23; the full fix above fails at
+ * function 12) -- confirmed via `keep_alive: 0` unload resetting whatever
+ * accumulates, so a periodic model unload is a viable workaround if this
+ * later proves to affect real `BackgroundIndexManager` runs.
  */
-export const PROMPT_VERSION = 'few-shot-v5';
+export const PROMPT_VERSION = 'few-shot-v6';
 
 /**
  * Session 66: default background-indexing scope. A full-repo pass
