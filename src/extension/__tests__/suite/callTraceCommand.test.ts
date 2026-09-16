@@ -95,7 +95,17 @@ suite('panel/callTraceCommand (Session 46, real sidecar, no Ollama needed -- gra
         sidecar?.dispose();
         // Deliberately does NOT dispose `output` -- see
         // blastRadiusCommand.test.ts's own suiteTeardown comment.
-        fs.rmSync(tempDir, { recursive: true, force: true });
+        // maxRetries/retryDelay, and a larger budget than
+        // searchExplanationsCommand.test.ts's own identical-looking fix
+        // needed: this suite's own tests call `vscode.window.showTextDocument`
+        // directly on files inside `tempDir` (an editor-tab handle, the
+        // thing that fix targets), but `sidecar` above is *also* a real
+        // child process rooted at `tempDir` -- `dispose()` sends the kill
+        // signal but returns before the OS has actually finished tearing the
+        // process down, so `tempDir` can still be briefly locked well past a
+        // 1s retry budget. Confirmed live: 5x200ms (1s total, the other
+        // suites' budget) still hit a real EPERM here.
+        fs.rmSync(tempDir, { recursive: true, force: true, maxRetries: 15, retryDelay: 300 });
         fs.rmSync(storageDir, { recursive: true, force: true });
     });
 

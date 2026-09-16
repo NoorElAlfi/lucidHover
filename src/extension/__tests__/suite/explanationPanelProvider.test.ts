@@ -83,7 +83,7 @@ suite('panel/explanationPanelProvider currentFunction tracking (Session 52)', ()
     });
 
     suiteTeardown(function () {
-        fs.rmSync(tempDir, { recursive: true, force: true });
+        fs.rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     });
 
     setup(() => {
@@ -267,7 +267,7 @@ suite('panel/explanationPanelProvider discoverability additions (Session 55)', (
     });
 
     suiteTeardown(function () {
-        fs.rmSync(tempDir, { recursive: true, force: true });
+        fs.rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     });
 
     setup(() => {
@@ -434,7 +434,7 @@ suite('panel/explanationPanelProvider "Back to caller" (Session 58)', () => {
     });
 
     suiteTeardown(function () {
-        fs.rmSync(tempDir, { recursive: true, force: true });
+        fs.rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     });
 
     setup(() => {
@@ -689,7 +689,7 @@ suite('panel/explanationPanelProvider refreshFor sequencing (Session 61)', () =>
     });
 
     suiteTeardown(function () {
-        fs.rmSync(tempDir, { recursive: true, force: true });
+        fs.rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     });
 
     setup(() => {
@@ -983,7 +983,7 @@ suite('panel/explanationPanelProvider freshness badge (Session 99)', () => {
     });
 
     suiteTeardown(function () {
-        fs.rmSync(tempDir, { recursive: true, force: true });
+        fs.rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     });
 
     setup(() => {

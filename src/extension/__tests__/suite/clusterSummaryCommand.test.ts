@@ -120,8 +120,11 @@ suite('panel/clusterSummaryCommand (Session 68, real sidecar for get_blast_radiu
     suiteTeardown(function () {
         sidecar?.dispose();
         // Deliberately does NOT dispose `output` -- see blastRadiusCommand.test.ts's
-        // own suiteTeardown comment for why.
-        fs.rmSync(tempDir, { recursive: true, force: true });
+        // own suiteTeardown comment for why. Larger maxRetries/retryDelay
+        // budget than a plain editor-tab-handle case needs -- see
+        // callTraceCommand.test.ts's suiteTeardown comment: `sidecar` above
+        // is a real child process rooted at `tempDir`.
+        fs.rmSync(tempDir, { recursive: true, force: true, maxRetries: 15, retryDelay: 300 });
         fs.rmSync(storageDir, { recursive: true, force: true });
     });
 

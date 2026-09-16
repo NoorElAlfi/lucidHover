@@ -54,7 +54,7 @@ suite('navigateToFunction refreshPanel callback (Session 58)', () => {
     });
 
     suiteTeardown(function () {
-        fs.rmSync(tempDir, { recursive: true, force: true });
+        fs.rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     });
 
     test('refreshPanel is called after a successful navigation via the workspace-symbol fallback (no sidecar)', async () => {

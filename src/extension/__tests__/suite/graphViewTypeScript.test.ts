@@ -112,8 +112,11 @@ suite('graph views on TypeScript shapes (Session 49, real sidecar, no Ollama nee
         // Deliberately does NOT dispose `output` -- see
         // blastRadiusCommand.test.ts's own suiteTeardown comment: a real
         // child process's stdout/stderr listeners can still fire after
-        // teardown() kills it but before it actually exits.
-        fs.rmSync(tempDir, { recursive: true, force: true });
+        // teardown() kills it but before it actually exits. Same reasoning
+        // extends to a larger maxRetries/retryDelay budget here than a
+        // plain editor-tab-handle case needs -- see
+        // callTraceCommand.test.ts's suiteTeardown comment.
+        fs.rmSync(tempDir, { recursive: true, force: true, maxRetries: 15, retryDelay: 300 });
         fs.rmSync(storageDir, { recursive: true, force: true });
     });
 

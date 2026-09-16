@@ -84,7 +84,7 @@ suite('codelens/RoleCodeLensProvider: VS Code auto-refreshes lenses on text edit
         registration.dispose();
         cache.dispose();
         output.dispose();
-        fs.rmSync(tempDir, { recursive: true, force: true });
+        fs.rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     });
 
     test('adding a function is reflected by vscode.executeCodeLensProvider with no provider.refresh() call', async () => {

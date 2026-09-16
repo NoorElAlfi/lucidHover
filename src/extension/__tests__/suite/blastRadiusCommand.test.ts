@@ -116,7 +116,13 @@ suite('panel/blastRadiusCommand (Session 45, real sidecar, no Ollama needed -- g
         // teardown() kills it but before it actually exits, and calling
         // appendLine on an already-disposed channel throws and corrupts
         // later suites in the same Mocha run.
-        fs.rmSync(tempDir, { recursive: true, force: true });
+        // maxRetries/retryDelay, with a larger budget than
+        // searchExplanationsCommand.test.ts's own identical-looking fix --
+        // see callTraceCommand.test.ts's own suiteTeardown comment for why:
+        // `sidecar` here is a real child process rooted at `tempDir`, whose
+        // OS-level teardown can outlast a plain editor-tab-handle's 1s
+        // retry budget.
+        fs.rmSync(tempDir, { recursive: true, force: true, maxRetries: 15, retryDelay: 300 });
         fs.rmSync(storageDir, { recursive: true, force: true });
     });
 

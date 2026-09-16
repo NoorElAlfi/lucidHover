@@ -87,7 +87,7 @@ suite('codelens/RoleGutterDecorationManager: live refresh on text edit (Session 
     });
 
     suiteTeardown(() => {
-        fs.rmSync(tempDir, { recursive: true, force: true });
+        fs.rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     });
 
     setup(async () => {
