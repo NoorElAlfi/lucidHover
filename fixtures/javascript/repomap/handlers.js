@@ -16,6 +16,7 @@ function validateAndPersistSignup(data) {
   const user = insertUser(data);
   sendWelcomeEmail(user);
   logEvent(`signup persisted for ${data.email}`);
+  return user;
 }
 
 function handleSignupRoute(req, res) {

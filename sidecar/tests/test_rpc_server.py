@@ -33,9 +33,14 @@ def test_resolves_the_exact_reported_case(repo_map):
     real function the sidecar already knows about. `line` is 0-indexed
     (matching Tag.start_line and vscode.Position, per `navigateToFunction`
     in explanationPanelProvider.ts) -- handlers.js's `function
-    handleRenderRoute` is on the 59th (1-indexed) line, i.e. row 58."""
+    handleRenderRoute` is on the 60th (1-indexed) line, i.e. row 59.
+    (A stray commit briefly dropped `validateAndPersistSignup`'s `return
+    user;` in this same file, shifting every later line up by one and
+    making this look like a genuine off-by-one; confirmed via
+    `python -m sidecar.repomap.cli` against the restored file that 59 is
+    the correct 0-indexed row, not a tree-sitter indexing quirk.)"""
     result = _handle_resolve_function(repo_map, {"name": "handleRenderRoute"})
-    assert result == {"found": True, "rel_fname": "handlers.js", "line": 58}
+    assert result == {"found": True, "rel_fname": "handlers.js", "line": 59}
 
 
 def test_unknown_name_returns_not_found(repo_map):
