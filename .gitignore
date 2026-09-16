@@ -18,11 +18,16 @@ reference/
 # Internal AI-workflow docs (spec/planning drafts, session briefs, the
 # Core-Rules-and-session-log file, and every session artifact under
 # .claude/) -- kept locally, not part of this repo's public history.
-# README.md, fixtures/REQUIREMENTS.md, and the fixtures/javascript summary-doc
-# fixtures under docs/wiki/ are exempted: they're needed to set up or run
-# this project, not just to continue an AI session.
+# README.md, CHANGELOG.md, fixtures/REQUIREMENTS.md, and the
+# fixtures/javascript summary-doc fixtures under docs/wiki/ are exempted:
+# they're needed to set up or run this project (or, for CHANGELOG.md, are a
+# real Marketplace-facing deliverable), not just to continue an AI session.
+# CHANGELOG.md itself was caught by this blanket *.md rule for two weeks
+# (2026-09-01 to 2026-09-16) before this exemption was added -- its content
+# was recovered from git history, not rewritten from scratch.
 *.md
 !README.md
+!CHANGELOG.md
 !fixtures/REQUIREMENTS.md
 !fixtures/javascript/docs/wiki/**
 .claude/

@@ -34,11 +34,20 @@ CLAUDE.md
 codebase-explainer-vscode-extension.md
 lucidhover-current-state.md
 lucidhover-session-briefs-*.md
+lucidhover-framework-and-python-roadmap.md
 lucidhover-ui-improvements.md
 lucidhover-card-redesign.html
 oddResponses.txt
 workflow-review.md
 docs/**
+
+# Stray untracked scratch file (a screenshot, not part of any commit) that
+# ended up sitting in the repo root -- excluded defensively rather than
+# assumed gone, since an untracked file surviving across many sessions'
+# worth of git status checks clearly isn't cleaning itself up. Worth
+# deleting or relocating outside the repo root entirely; flagged, not done
+# here since its origin/purpose wasn't confirmed.
+handlers_python_oddity.png
 
 # Packaging output and generated reports -- never runtime content
 dist/**
