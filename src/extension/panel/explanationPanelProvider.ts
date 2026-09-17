@@ -805,7 +805,13 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
         gap: 6px;
         flex-wrap: wrap;
     }
-    .lh-meta .lh-file { color: var(--vscode-textLink-foreground); }
+    .lh-meta .lh-file {
+        color: var(--vscode-textLink-foreground);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 100%;
+    }
     .lh-actions { display: flex; gap: 4px; flex-shrink: 0; margin-left: auto; }
     .lh-btn {
         appearance: none;
@@ -1156,6 +1162,38 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
     // Session 55: plain relative-time text ("3 days ago") for the
     // single-explanation view's generated_at timestamp -- coarse buckets
     // are enough here, no need for a library.
+    // Long workspace-relative paths otherwise wrap the header meta row onto
+    // multiple lines (real user report). Truncates from the middle rather
+    // than the end so the filename -- the most useful part -- always stays
+    // fully visible, with the leading directory context kept as far as it
+    // fits; the untruncated path is still available via fileSpan.title.
+    var PATH_TRUNCATE_MAX_LEN = 48;
+    function truncatePathMiddle(relFile, maxLen) {
+        if (relFile.length <= maxLen) {
+            return relFile;
+        }
+        const parts = relFile.split('/');
+        const base = parts[parts.length - 1];
+        const budget = maxLen - base.length - 2; // 2 for the '…/' separator
+        if (budget <= 0) {
+            // Even the filename alone doesn't fit -- fall back to an
+            // end-truncated filename rather than showing nothing useful.
+            return '…' + base.slice(-(maxLen - 1));
+        }
+        let front = '';
+        for (let i = 0; i < parts.length - 1; i++) {
+            const next = front ? front + '/' + parts[i] : parts[i];
+            if (next.length > budget) {
+                break;
+            }
+            front = next;
+        }
+        if (!front) {
+            front = relFile.slice(0, budget);
+        }
+        return front + '…/' + base;
+    }
+
     function relativeTime(isoString) {
         const then = new Date(isoString).getTime();
         if (Number.isNaN(then)) {
@@ -1344,7 +1382,8 @@ export class ExplanationPanelProvider implements vscode.WebviewViewProvider {
             meta.appendChild(dot1);
             const fileSpan = document.createElement('span');
             fileSpan.className = 'lh-file';
-            fileSpan.textContent = relFile;
+            fileSpan.textContent = truncatePathMiddle(relFile, PATH_TRUNCATE_MAX_LEN);
+            fileSpan.title = relFile;
             meta.appendChild(fileSpan);
         }
         const relTime = typeof generatedAt === 'string' ? relativeTime(generatedAt) : null;
