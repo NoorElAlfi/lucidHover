@@ -7,6 +7,7 @@ import { ExplanationCache } from './cache/explanationCache';
 import { RoleCodeLensProvider } from './codelens/roleCodeLensProvider';
 import { RoleGutterDecorationManager } from './codelens/roleGutterDecorations';
 import { DirtyTracker } from './dirtyTracking';
+import { registerGenerateCodebaseDigestCommand } from './digest/generateDigestCommand';
 import { GitHookReindexManager, registerInstallGitHooksCommand } from './gitHookReindex';
 import { ExplanationHoverProvider } from './hover/functionHoverProvider';
 import { documentSelectorForSupportedLanguages } from './languages';
@@ -407,6 +408,16 @@ export function activate(context: vscode.ExtensionContext): void {
             output
         )
     );
+
+    // Codebase digest export (chat-discussed follow-up, not a Build Order
+    // step) -- registered unconditionally (Core Rule 6, same pattern as the
+    // other commands above); its own readiness check (sidecar non-null)
+    // lives inside the command handler, same as "Generate Summary Docs".
+    // Explicit-command-only, same "new category of side effect" reasoning
+    // as that command -- opening an untitled document and touching the
+    // clipboard are both real user-visible actions, not something that
+    // should ever fire as a side effect of indexing.
+    context.subscriptions.push(registerGenerateCodebaseDigestCommand(() => sidecarManager ?? undefined, output));
 
     if (isWorkspaceTrusted()) {
         void startIndexing(context, output);

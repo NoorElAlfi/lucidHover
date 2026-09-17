@@ -15,7 +15,12 @@ from __future__ import annotations
 import pytest
 
 from sidecar.repomap.context import RepoMap
-from sidecar.rpc_server import _handle_get_blast_radius, _handle_get_call_trace, _handle_resolve_function
+from sidecar.rpc_server import (
+    _handle_generate_digest,
+    _handle_get_blast_radius,
+    _handle_get_call_trace,
+    _handle_resolve_function,
+)
 from sidecar.tests.fixture_paths import fixture_repomap_root
 
 FIXTURE_ROOT = fixture_repomap_root("javascript")
@@ -168,3 +173,21 @@ def test_get_call_trace_unresolvable_function_returns_empty(repo_map):
     assert result["name"] == "doesNotExist"
     assert result["nodes"] == []
     assert result["edges"] == []
+
+
+def test_generate_digest_returns_real_fixture_contents(repo_map):
+    """
+    Codebase digest export session: `_handle_generate_digest` is a thin
+    wrapper (walk `repo_map.root`, render text) with no graph/cache
+    involvement -- `sidecar/tests/test_digest.py` covers the real
+    walk/filter/budget logic in isolation, this just confirms the RPC
+    handler wires it up correctly (`asdict`-free, a plain dict already) and
+    that `repo_map.root` really does resolve to the real fixture directory
+    used everywhere else in this file.
+    """
+    result = _handle_generate_digest(repo_map, {})
+    assert result["total_files"] > 0
+    assert result["included_files"] > 0
+    assert result["truncated"] is False
+    assert "File: handlers.js" in result["text"]
+    assert "validateAndPersistSignup" in result["text"]

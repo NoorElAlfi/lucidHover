@@ -119,6 +119,10 @@
       {
         "command": "lucidhover.searchExplanations",
         "title": "LucidHover: Search Explanations"
+      },
+      {
+        "command": "lucidhover.generateCodebaseDigest",
+        "title": "LucidHover: Generate Codebase Digest"
       }
     ],
     "menus": {

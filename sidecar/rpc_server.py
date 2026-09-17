@@ -102,6 +102,13 @@ Methods:
     paragraph for the cluster. Same shape as "generate_file_summary" -- one
     new LLM call over data already computed, no new ranking/graph logic.
     Same `ollama_base_url` resolution as "generate_explanation" above.
+  - "generate_digest" (codebase digest export, chat-discussed follow-up):
+    walks `repo_map.root` (see `sidecar/digest/ingestion.py`) and returns a
+    gitingest-style plain-text digest -- summary, ASCII tree, and the
+    content of every non-excluded, non-gitignored, under-budget file. Pure
+    filesystem work, no graph/cache/ranking involved and no LLM call; the
+    extension host opens the returned text as a document for the user to
+    copy into an LLM themselves (Core Rule 1).
 
 The extension host is the only client and connects/reconnects at most once
 per process lifetime (a crashed sidecar is a whole new process, not a
@@ -177,6 +184,7 @@ from dataclasses import asdict
 from typing import Any
 
 from .cache.hashing import CONTEXT_TIER_CALL_GRAPH_AND_RETRIEVAL, CONTEXT_TIER_CALL_GRAPH_ONLY, compute_context_hash
+from .digest.ingestion import generate_digest, render_digest
 from .generation.generate import generate_cluster_summary, generate_explanation, generate_file_summary
 from .generation.ollama_client import OLLAMA_BASE_URL, OllamaError
 from .repomap.context import BlastRadius, CallTrace, FunctionContext, RepoMap
@@ -435,6 +443,20 @@ def _handle_generate_cluster_summary(repo_map: RepoMap, params: dict[str, Any]) 
     return {"summary": summary}
 
 
+def _handle_generate_digest(repo_map: RepoMap, _params: dict[str, Any]) -> dict[str, Any]:
+    # No read_lock: this doesn't touch tags_by_file/graph/importance at all,
+    # only repo_map.root (set once at construction, never mutated) -- a
+    # plain filesystem walk, same "no graph state involved" reasoning
+    # _handle_generate_file_summary's callers-list param already has.
+    result = generate_digest(repo_map.root)
+    return {
+        "text": render_digest(result),
+        "total_files": result.total_files,
+        "included_files": result.included_files,
+        "truncated": result.truncated,
+    }
+
+
 _METHODS = {
     "status": _handle_status,
     "index_file": _handle_index_file,
@@ -446,6 +468,7 @@ _METHODS = {
     "get_call_trace": _handle_get_call_trace,
     "generate_file_summary": _handle_generate_file_summary,
     "generate_cluster_summary": _handle_generate_cluster_summary,
+    "generate_digest": _handle_generate_digest,
 }
 
 

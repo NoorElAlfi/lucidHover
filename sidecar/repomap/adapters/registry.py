@@ -66,7 +66,11 @@ class LanguageRegistry:
             return None
         return self._adapters[language_id]
 
-    def _is_dir_excluded(self, name: str) -> bool:
+    def is_dir_excluded(self, name: str) -> bool:
+        """Public (Session: codebase digest export) -- `sidecar/digest/ingestion.py` walks
+        every non-excluded file, not just registered-language source files, and needs the
+        exact same exact-name/glob-pattern exclusion decision `discover_files` below already
+        makes, rather than a second, potentially-drifting copy of the fnmatch logic."""
         if name in self._excluded_dir_literals:
             return True
         return any(fnmatch.fnmatch(name, pattern) for pattern in self._excluded_dir_patterns)
@@ -79,7 +83,7 @@ class LanguageRegistry:
         """
         results: dict[str, list[str]] = {language_id: [] for language_id in self._adapters}
         for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = [d for d in dirnames if not self._is_dir_excluded(d)]
+            dirnames[:] = [d for d in dirnames if not self.is_dir_excluded(d)]
             for name in filenames:
                 language_id = self.language_for_file(name)
                 if language_id is not None:

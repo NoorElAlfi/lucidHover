@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 
+from sidecar.repomap.adapters import get_registry
 from sidecar.repomap.extraction import find_source_files
 
 
@@ -44,3 +45,14 @@ def test_glob_pattern_does_not_over_match(tmp_path):
 
     found = {os.path.basename(f) for f in find_source_files(str(tmp_path))}
     assert found == {"egg-info-notes.py", "d.py"}
+
+
+def test_is_dir_excluded_is_public_for_the_digest_walk_to_reuse():
+    """`is_dir_excluded` (renamed from `_is_dir_excluded`, codebase digest
+    export session) must stay public -- `sidecar/digest/ingestion.py` calls
+    it directly to reuse this exact exclusion decision for its own,
+    broader-than-source-files walk."""
+    registry = get_registry()
+    assert registry.is_dir_excluded("node_modules") is True
+    assert registry.is_dir_excluded("mypackage.egg-info") is True
+    assert registry.is_dir_excluded("src") is False
