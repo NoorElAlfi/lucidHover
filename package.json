@@ -3,7 +3,7 @@
   "publisher": "lucidhover",
   "displayName": "LucidHover",
   "description": "Codebase-aware function explainer: hover any function to see what it does, its callers/callees, and its blast radius -- generated locally, no cloud API keys.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "NoorElAlfi",
   "license": "Apache-2.0",
   "icon": "media/icon.png",

@@ -1,26 +1,42 @@
 # Changelog
 
 All notable changes to LucidHover are documented in this file. Entries are added per release going
-forward; the development sessions preceding this file are not backfilled here — see
+forward; the development sessions preceding a given entry are not backfilled beyond a summary — see
 `.claude/sessions/` for that history.
+
+## 0.2.0 — Python support, call-graph fixes, and UX polish
+
+Everything below shipped since 0.1.0's publish:
+
+- **Python support** — hover explanations, the docked panel, and CodeLens now work for Python
+  functions, alongside the existing JavaScript/TypeScript/TSX support. Python additionally requires
+  a Python language extension (e.g. [Pylance](https://marketplace.visualstudio.com/items?itemName=ms-python.python))
+  installed and active — see the README's "Supported languages" note.
+- JSX/TSX component usage (`<Button />`, including namespaced tags like `<Menu.Item />`) is now
+  correctly captured and resolved in the call graph — previously invisible regardless of how many
+  times a component was used.
+- Compound-component exports (`Object.assign(Root, {...})`, `Foo.Bar = existingFn`) are now
+  correctly resolved too, closing the matching definition-side gap.
+- The docked panel's "Used by"/"Calls" lists now scroll past a handful of rows instead of silently
+  truncating to 3 with no indication more existed.
+- The sidecar sleeps at a slower poll rate once genuinely idle, instead of waking 50x/sec forever —
+  reduces background CPU/power draw with no measurable hit to interactive responsiveness.
+- Generation prompt improvements: explanations no longer copy a caller/callee illustrative example's
+  wording verbatim into unrelated answers, no longer describe a decorator's behavior from its name
+  alone when the body doesn't confirm it, and no longer mistake retrieval-tier background context
+  (similar code an embedding search surfaced, not this function's own callers or behavior) for real
+  caller/callee/behavior evidence.
 
 ## 0.1.0 — Initial release
 
-First public-readiness snapshot. Nothing has been published to the Marketplace yet, so everything
-below is still part of the same unreleased 0.1.0 milestone. Highlights:
+First published version. Highlights:
 
-- Hover explanations for **JavaScript, TypeScript, TSX, and Python** functions, generated locally
-  via Ollama and served from a local SQLite cache — hover is a cache lookup, not a live model call,
-  except for a narrow cache-miss fallback. Python hover/panel/CodeLens features additionally
-  require a Python language extension (e.g. Pylance) installed and active — see the README's
-  "Supported languages" note.
-- JSX/TSX component usage (`<Button />`, including namespaced tags like `<Menu.Item />`) and
-  compound-component exports (`Object.assign(Root, {...})`, `Foo.Bar = existingFn`) are correctly
-  captured and resolved in the call graph, not silently invisible.
+- Hover explanations for JavaScript, TypeScript, and TSX functions, generated locally via Ollama
+  and served from a local SQLite cache — hover is a cache lookup, not a live model call, except for
+  a narrow cache-miss fallback.
 - Docked explanation panel, redesigned as a themed card layout (why it exists, side effects, risk
-  notes, known callers/callees — now scrollable instead of truncating past a handful of rows —, a
-  regenerate button, copy-to-clipboard, a relative "generated N ago" timestamp, and a "Back to
-  caller" link when you navigate into a used-by/calls row).
+  notes, known callers/callees, copy, regenerate, relative timestamp, and a "Back to caller" link
+  when you navigate into a used-by/calls row).
 - CodeLens role badges and gutter icons.
 - Blast radius and execution trace graph views, sharing the same card-based visual design as the
   explanation panel, with inline branch expansion on execution traces.
@@ -46,10 +62,3 @@ below is still part of the same unreleased 0.1.0 milestone. Highlights:
 - Panel content stays consistent with the active selection: navigating via a caller/callee link or
   either quick pick command always refreshes the docked panel, and a rapid sequence of cursor moves
   can no longer leave a stale explanation on screen.
-- The sidecar sleeps at a slower poll rate once genuinely idle, instead of waking 50x/sec forever —
-  reduces background CPU/power draw with no measurable hit to interactive responsiveness.
-- Generation prompt improvements: explanations no longer copy a caller/callee illustrative example's
-  wording verbatim into unrelated answers, no longer describe a decorator's behavior from its name
-  alone when the body doesn't confirm it, and no longer mistake retrieval-tier background context
-  (similar code an embedding search surfaced, not this function's own callers or behavior) for real
-  caller/callee/behavior evidence.
