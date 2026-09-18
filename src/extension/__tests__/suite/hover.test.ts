@@ -179,4 +179,36 @@ suite('hover/ExplanationHoverProvider (Core Rule 4: cache-lookup-only on a hit)'
         });
         assert.ok(cached);
     });
+
+    test('cache miss: a failed generate_explanation renders a visible error hover instead of silently returning nothing', async () => {
+        // Regression test for a real pre-publish finding: `provideHover` had
+        // no error handling around `generateAndCache` at all, so a rejection
+        // (timeout, real Ollama error, dropped connection) propagated out of
+        // the async provider uncaught -- VS Code's hover machinery swallows
+        // that silently, leaving the user with no hover, nothing logged, and
+        // no cached row (so re-hovering just repeats the identical failure).
+        const requestStub = sandbox.stub(sidecar, 'request').rejects(new Error('sidecar request timed out: generate_explanation'));
+
+        const position = new vscode.Position(8, 10); // greet(name)
+        const resolved = await resolveEnclosingFunction(document, position, workspaceRoot);
+        assert.ok(resolved);
+
+        const provider = makeProvider();
+        const hover = await provider.provideHover(document, position);
+
+        assert.ok(hover, 'expected a visible error hover, not undefined/silent failure');
+        assert.strictEqual(requestStub.calledOnce, true);
+        const rendered = (hover!.contents[0] as vscode.MarkdownString).value;
+        assert.match(rendered, /Couldn't generate an explanation/);
+
+        // Nothing was cached on failure, so nothing should have been written.
+        const cached = cache.lookup({
+            fnId: resolved!.fnId,
+            fnHash: resolved!.fnHash,
+            modelId: resolveModelId(),
+            embeddingModelId: EMBEDDING_MODEL_ID,
+            promptVersion: PROMPT_VERSION,
+        });
+        assert.strictEqual(cached, undefined);
+    });
 });

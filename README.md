@@ -80,6 +80,8 @@ indexing and generation still work, but nothing surfaces in the editor.
   a pass finishes, all in the tooltip. Only the most important functions are indexed up front by
   default — everything else is generated the first time you hover it.
 - **Summary docs** — generate per-file Markdown summaries from already-cached explanations.
+- **Codebase digest** — export your whole workspace (tree + file contents, `.gitignore`-aware, size-
+  budgeted) as one plain-text document you can paste into any LLM yourself. Fully local.
 - **Automatic staleness tracking** — edits and cross-file changes flag affected explanations as
   stale so you know when what you're reading no longer matches the code.
 
@@ -100,6 +102,7 @@ All commands are available from the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift
 | LucidHover: Show Most Important Functions | Quick pick of the codebase's highest-ranked functions |
 | LucidHover: Search Explanations | Fuzzy-search cached explanations |
 | LucidHover: Generate Summary Docs | Writes per-file Markdown summaries to `docs/wiki/` |
+| LucidHover: Generate Codebase Digest | Opens a plain-text digest of the workspace and copies it to the clipboard |
 | LucidHover: Purge Superseded Cache Rows | Manually cleans up superseded cache rows |
 | LucidHover: Install Git Hooks | Installs hooks to re-index on checkout/merge/commit |
 | LucidHover: Restart Sidecar (Apply Ollama Endpoint Setting) | Restarts the sidecar to pick up a changed Ollama endpoint |

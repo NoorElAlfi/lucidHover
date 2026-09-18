@@ -214,6 +214,66 @@ suite('sidecar/SidecarManager (crash recovery)', () => {
         assert.strictEqual(spawnStub.callCount, 2, 'a stale exit event must not trigger another restart');
     });
 
+    // Pre-publish gate finding: a restart landing mid-BackgroundIndexManager
+    // pass caused 1-2 guaranteed failures purely from the teardown/reconnect
+    // window -- onWillRestart/onDidRestart exist so extension.ts can pause
+    // that pass around a restart instead. Confirms the event pair itself,
+    // independent of BackgroundIndexManager (which has its own suite).
+    test('onWillRestart fires once per restart() call, onDidRestart fires once it reconnects', async () => {
+        const fakeChildren: FakeChildProcess[] = [];
+        spawnStub.callsFake(() => {
+            const child = createFakeChildProcess();
+            fakeChildren.push(child);
+            return child as unknown as cp.ChildProcess;
+        });
+        stubConnectAlwaysSucceeds(connectStub);
+
+        manager = makeManager(output, spawnStub, connectStub);
+
+        const willRestart = sinon.spy();
+        const didRestart = sinon.spy();
+        manager.onWillRestart(willRestart);
+        manager.onDidRestart(didRestart);
+
+        // The very first start() is not a restart -- neither event should
+        // fire for it.
+        await manager.start();
+        assert.strictEqual(willRestart.callCount, 0, 'the initial start() must not fire onWillRestart');
+        assert.strictEqual(didRestart.callCount, 0, 'the initial start() must not fire onDidRestart');
+
+        const restarted = await manager.restart('manual', true);
+        assert.strictEqual(restarted, true);
+        assert.strictEqual(willRestart.callCount, 1, 'expected onWillRestart to fire once for the restart');
+        assert.strictEqual(didRestart.callCount, 1, 'expected onDidRestart to fire once the restart reconnected');
+        assert.strictEqual(
+            willRestart.calledBefore(didRestart),
+            true,
+            'onWillRestart must fire before onDidRestart, not after'
+        );
+    });
+
+    test('onDidRestart does not fire when the recovery loop gives up', async function () {
+        this.timeout(90_000); // real backoff delays (up to ~54s) -- same reasoning as the give-up test below
+
+        spawnStub.callsFake(() => createFakeChildProcess() as unknown as cp.ChildProcess);
+        stubConnectAlwaysFails(connectStub);
+
+        manager = makeManager(output, spawnStub, connectStub);
+        const willRestart = sinon.spy();
+        const didRestart = sinon.spy();
+        manager.onWillRestart(willRestart);
+        manager.onDidRestart(didRestart);
+
+        const gaveUp = await manager.restart('test give-up path');
+        assert.strictEqual(gaveUp, false);
+        assert.strictEqual(willRestart.callCount, 1, 'onWillRestart still fires -- the attempt genuinely started');
+        assert.strictEqual(
+            didRestart.callCount,
+            0,
+            'onDidRestart must not fire when every attempt in the recovery loop failed'
+        );
+    });
+
     test(
         'gives up after MAX_RESTART_ATTEMPTS consecutive failures (status + one-time toast), ' +
             'then a manual restart un-sticks it',

@@ -234,6 +234,29 @@ export class SidecarManager implements vscode.Disposable {
     private readonly connectRetryAttempts: number;
     private readonly connectRetryDelayMs: number;
 
+    /**
+     * Fired at the start of every restart attempt (any trigger -- heartbeat
+     * threshold, unexpected exit, the manual "Restart Sidecar" command --
+     * `restart()`'s own doc comment lists all of them) and again once a
+     * restart actually reconnects successfully. Added after a real,
+     * live-reproduced finding (pre-publish gate pass): a sidecar restart
+     * landing mid-`BackgroundIndexManager` pass caused 1-2 guaranteed,
+     * avoidable failures purely from the teardown/reconnect window itself
+     * (a `"sidecar torn down"` rejection for whatever was in flight, then a
+     * `"sidecar is not connected"` rejection for the loop's next claim,
+     * attempted before the new process finished reconnecting) -- nothing to
+     * do with real generation slowness. `extension.ts` wires these to
+     * `BackgroundIndexManager.pause()`/`resume()` so a restart quiesces the
+     * pass instead of burning through it. Deliberately a generic pair of
+     * events here, not a direct `BackgroundIndexManager` reference -- this
+     * class has no business knowing that type exists; any future caller
+     * that wants to react to a restart can subscribe the same way.
+     */
+    private readonly _onWillRestart = new vscode.EventEmitter<void>();
+    readonly onWillRestart = this._onWillRestart.event;
+    private readonly _onDidRestart = new vscode.EventEmitter<void>();
+    readonly onDidRestart = this._onDidRestart.event;
+
     constructor(
         workspaceRoot: string,
         extensionRoot: string,
@@ -529,6 +552,8 @@ export class SidecarManager implements vscode.Disposable {
         this.cancelPendingRetry();
         this.teardown('dispose');
         this.statusBarItem.dispose();
+        this._onWillRestart.dispose();
+        this._onDidRestart.dispose();
     }
 
     /**
@@ -663,6 +688,7 @@ export class SidecarManager implements vscode.Disposable {
     private async runRecoveryLoop(reason: string): Promise<boolean> {
         this.restarting = true;
         this.log(`sidecar recovery starting (${reason})`);
+        this._onWillRestart.fire();
         try {
             while (!this.disposed) {
                 this.teardown(reason);
@@ -674,6 +700,7 @@ export class SidecarManager implements vscode.Disposable {
                     this.givenUp = false;
                     this.lastFailureCause = null;
                     this.updateStatusBar();
+                    this._onDidRestart.fire();
                     return true;
                 } catch (err) {
                     this.restartAttempts++;

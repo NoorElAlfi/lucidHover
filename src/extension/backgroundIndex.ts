@@ -206,9 +206,14 @@ export class BackgroundIndexManager implements vscode.Disposable {
      * `generated + skipped` -- both mean the function has a cache entry
      * now; `unresolved`/`failed` don't. `undefined` until a pass has fully
      * completed at least once (idle state stays hidden until then, same as
-     * before this session).
+     * before this session). `failed` (pre-publish gate finding) is carried
+     * alongside `covered`/`total` so the idle-phase tooltip can append the
+     * same "N failed" note the running-phase tooltip already shows
+     * (`progressDetail()`) -- before this, a real failure became invisible
+     * the moment the pass finished: the idle summary only ever showed the
+     * plain fraction, with no persistent indication anything had gone wrong.
      */
-    private lastCoverage: { covered: number; total: number } | undefined;
+    private lastCoverage: { covered: number; total: number; failed: number } | undefined;
 
     /**
      * Rolling window of successful-generation completion timestamps
@@ -385,10 +390,14 @@ export class BackgroundIndexManager implements vscode.Disposable {
                 // (untrusted workspace, first activation before a pass
                 // finishes, etc).
                 if (this.lastCoverage) {
-                    const { covered, total } = this.lastCoverage;
+                    const { covered, total, failed } = this.lastCoverage;
                     const pct = total > 0 ? Math.round((covered / total) * 100) : 0;
+                    // Session 65's own "append, N failed only when nonzero"
+                    // convention -- a clean pass's tooltip text stays exactly
+                    // as it was before this field existed.
+                    const failedNote = failed > 0 ? `, ${failed} failed` : '';
                     this.statusBarItem.text = `$(check) LucidHover: ${covered}/${total} explained`;
-                    this.statusBarItem.tooltip = `Background indexing coverage (${covered}/${total}, ${pct}%) as of the last completed pass, against the configured background-index scope.`;
+                    this.statusBarItem.tooltip = `Background indexing coverage (${covered}/${total}, ${pct}%${failedNote}) as of the last completed pass, against the configured background-index scope.`;
                     this.statusBarItem.backgroundColor = undefined;
                     this.statusBarItem.show();
                 } else {
@@ -617,7 +626,7 @@ export class BackgroundIndexManager implements vscode.Disposable {
 
         const status = token.isCancellationRequested ? (this.getPhase() === 'pausing' ? 'paused' : 'canceled') : 'done';
         if (status === 'done') {
-            this.lastCoverage = { covered: generated + skipped, total: ranked.length };
+            this.lastCoverage = { covered: generated + skipped, total: ranked.length, failed };
         }
         let summary = `${generated} generated, ${skipped} already cached, ${unresolved} unresolved`;
         if (failed > 0) {

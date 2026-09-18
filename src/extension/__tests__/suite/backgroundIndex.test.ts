@@ -768,6 +768,49 @@ suite('backgroundIndex pause/resume (Session 52)', () => {
         }
     });
 
+    // Pre-publish gate finding: a real generation failure was silently
+    // invisible once the pass finished -- the idle-phase tooltip only ever
+    // showed the plain coverage fraction, with nothing indicating one of the
+    // "covered" functions had actually failed. Mirrors the running-phase
+    // tooltip's own "N failed" wording (Session 65) rather than inventing a
+    // second convention.
+    test('idle-phase status bar tooltip notes a failed count once a pass finishes with a real failure', async function () {
+        this.timeout(20_000);
+        sandbox.stub(sidecar, 'waitForInteractiveIdle').resolves();
+        const requestStub = sandbox.stub(sidecar, 'request');
+        requestStub.withArgs('list_ranked_functions').resolves({
+            functions: [
+                { rel_fname: 'a.js', name: 'a', line: 0, importance: 2 },
+                { rel_fname: 'b.js', name: 'b', line: 0, importance: 1 },
+            ],
+        });
+        requestStub
+            .withArgs('generate_explanation')
+            .onFirstCall()
+            .resolves({
+                context_hash: 'ctx',
+                context_tier: 'call_graph_only',
+                explanation: { role_tag: 'utility', one_liner: 'explained' },
+            })
+            .onSecondCall()
+            .rejects(new Error('sidecar request timed out: generate_explanation'));
+
+        const statusBarItem = (manager as unknown as { statusBarItem: vscode.StatusBarItem }).statusBarItem;
+
+        manager.start();
+        await waitForPhase('idle');
+
+        assert.strictEqual(
+            statusBarItem.text,
+            '$(check) LucidHover: 1/2 explained',
+            'the one real failure must not count toward "covered"'
+        );
+        assert.ok(
+            (statusBarItem.tooltip as string).includes('1/2, 50%, 1 failed'),
+            `expected the idle tooltip to note the failed count, got: ${statusBarItem.tooltip}`
+        );
+    });
+
     test('backgroundIndexScope "fullRepo" opts out of the topN truncation even when backgroundIndexTopN is small (Session 66)', async function () {
         this.timeout(20_000);
         await setConfig('backgroundIndexScope', 'fullRepo');

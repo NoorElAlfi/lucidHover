@@ -60,6 +60,30 @@ function renderMarkdown(row: CacheRow, freshness: FreshnessState): vscode.Markdo
 }
 
 /**
+ * Rendered when the cache-miss fallback's `generate_explanation` call fails
+ * or times out (`GENERATE_TIMEOUT_MS`, 120s -- see generation.ts). Before
+ * this existed, `provideHover` had no error handling around that call at
+ * all: a rejection propagated out of the async provider uncaught, which VS
+ * Code's hover machinery swallows silently -- no hover, nothing logged, no
+ * indication anything went wrong. Found live (real-machine repro) during a
+ * pre-publish gate pass: a slow/failing generation left the user with total
+ * silence, and re-hovering the same function just re-ran the identical
+ * cache-miss-and-generate flow from scratch (nothing was ever cached),
+ * which looked like one continuous multi-minute hang rather than repeated
+ * silent ~2-minute failures. This doesn't fix *why* a generation might be
+ * slow or fail -- it only makes a failure visible instead of invisible.
+ */
+function renderErrorMarkdown(): vscode.MarkdownString {
+    const markdown = new vscode.MarkdownString();
+    markdown.appendMarkdown('#### LucidHover\n\n');
+    markdown.appendMarkdown(
+        "Couldn't generate an explanation for this function. See the LucidHover output channel for details.\n\n"
+    );
+    markdown.appendMarkdown('*Hovering again will retry.*');
+    return markdown;
+}
+
+/**
  * Cache-backed hover provider (Session 5, generation wired in Session 6,
  * two-surface rendering split out in Session 7). Hover is a cache lookup
  * only (Core Rule 4): on a hit, renders directly from the cached row with no
@@ -111,7 +135,12 @@ export class ExplanationHoverProvider implements vscode.HoverProvider {
             this.output.appendLine(`cache hit for ${fnId} -- sidecar not invoked`);
         } else {
             this.output.appendLine(`cache miss for ${fnId} -- requesting generate_explanation`);
-            row = await generateAndCache(sidecar, cache, resolved);
+            try {
+                row = await generateAndCache(sidecar, cache, resolved);
+            } catch (err) {
+                this.output.appendLine(`generate_explanation failed for ${fnId}: ${String(err)}`);
+                return new vscode.Hover(renderErrorMarkdown(), range);
+            }
         }
 
         const dirty = this.getDirtyTracker()?.dirtyFnIdsFor(relFile)?.has(fnId) ?? false;

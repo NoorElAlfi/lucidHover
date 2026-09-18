@@ -97,6 +97,36 @@ async function startIndexing(context: vscode.ExtensionContext, output: vscode.Ou
     sidecarManager = manager;
     context.subscriptions.push(manager);
 
+    // A sidecar restart mid-pass otherwise costs BackgroundIndexManager 1-2
+    // guaranteed, avoidable failures purely from the teardown/reconnect
+    // window (real, live-reproduced pre-publish finding -- see
+    // SidecarManager's onWillRestart/onDidRestart doc comment). `pausedFor
+    // Restart` is only set true when this handler itself actually paused a
+    // running pass, so a restart landing while background indexing is idle
+    // (the common case) never spuriously kicks off a fresh pass afterward.
+    let pausedForRestart = false;
+    context.subscriptions.push(
+        manager.onWillRestart(() => {
+            // Reassigned (not just set-to-true) on every restart so a flag
+            // left over from a give-up path (onDidRestart never fired) can't
+            // leak into a later restart and override a user's manual pause.
+            pausedForRestart = backgroundIndexManager?.getPhase() === 'running';
+            if (pausedForRestart) {
+                backgroundIndexManager?.pause();
+            }
+        })
+    );
+    context.subscriptions.push(
+        manager.onDidRestart(() => {
+            // Also require the pass to still be paused: if the user manually
+            // resumed mid-restart, there's nothing left for us to resume.
+            if (pausedForRestart && backgroundIndexManager?.getPhase() === 'paused') {
+                backgroundIndexManager.resume();
+            }
+            pausedForRestart = false;
+        })
+    );
+
     // Build Order step 16: routes the very first startup attempt through the
     // same backoff-retry-then-give-up recovery loop as a mid-session crash,
     // rather than a single unretried attempt -- a Python-not-on-PATH-yet or

@@ -26,6 +26,17 @@ Everything below shipped since 0.1.0's publish:
   alone when the body doesn't confirm it, and no longer mistake retrieval-tier background context
   (similar code an embedding search surfaced, not this function's own callers or behavior) for real
   caller/callee/behavior evidence.
+- **Generate Codebase Digest** — a new command that walks your workspace and produces a single
+  plain-text digest (summary, directory tree, and file contents, respecting `.gitignore` and size
+  budgets) in a new untitled document and on your clipboard, ready to paste into any LLM yourself.
+  Fully local; nothing is sent anywhere.
+- Long file paths in the docked panel's header are now truncated in the middle (keeping the file name
+  visible) instead of wrapping onto multiple lines; hover the path for the full text.
+- Hovering a function whose explanation fails to generate (for example a timeout) now shows a clear
+  "couldn't generate an explanation" message and logs the error, instead of silently showing nothing.
+- Restarting the sidecar (the "Restart Sidecar" command, or automatic crash recovery) while background
+  indexing is running now pauses and resumes the pass instead of causing avoidable generation failures.
+- The status bar's post-indexing coverage tooltip now notes how many functions failed, when any did.
 
 ## 0.1.0 — Initial release
 
